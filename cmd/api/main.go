@@ -24,17 +24,14 @@ import (
 	"github.com/bid-hub/admin-backend/platform/cache"
 	"github.com/bid-hub/admin-backend/platform/database"
 	"github.com/bid-hub/admin-backend/platform/env"
-	"github.com/bid-hub/admin-backend/platform/logger"
 	"github.com/bid-hub/admin-backend/platform/validate"
 	"github.com/bid-hub/admin-backend/platform/worker"
 	"github.com/getsentry/sentry-go"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/helmet"
-	fiberlog "github.com/gofiber/fiber/v3/middleware/logger"
-	fiber_recover "github.com/gofiber/fiber/v3/middleware/recover"
-	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
+	logger "github.com/gofiber/fiber/v3/middleware/logger"
+	fiberRecover "github.com/gofiber/fiber/v3/middleware/recover"
 	"gorm.io/gorm"
 )
 
@@ -43,9 +40,6 @@ func main() {
 
 	// 1. Load Configuration
 	cfg := env.LoadConfig()
-
-	// Configure the process-wide structured logger from env (LOG_LEVEL, LOG_FORMAT).
-	slog.SetDefault(logger.New(cfg.LogLevel, cfg.LogFormat))
 
 	// 1b. Initialize Sentry for error tracking and structured logging.
 	// Tuned for the Sentry Free plan (5,000 errors/month)   only sends
@@ -113,10 +107,6 @@ func main() {
 		slog.Info("Development environment - running database migrations")
 		database.Migrate(db)
 
-		// Seed admin user only in non-production environments
-		if err := seedAdmin(cfg, db); err != nil {
-			slog.Error("Failed to seed admin user", "error", err)
-		}
 	} else {
 		slog.Info("Production environment - applied safe schema patches; skipping full AutoMigrate/seed")
 	}
@@ -165,14 +155,14 @@ func main() {
 
 	// IMPORTANT: Recover must be the very first middleware so panics from ANY
 	// handler (including the CSRF group) are always caught safely.
-	app.Use(fiber_recover.New(fiber_recover.Config{
+	app.Use(fiberRecover.New(fiberRecover.Config{
 		EnableStackTrace: false,
 		StackTraceHandler: func(c fiber.Ctx, e any) {
 			// no-op: keep stack traces out of production logs
 		},
 	}))
 	app.Use(handler.RequestID())
-	app.Use(fiberlog.New(fiberlog.Config{
+	app.Use(logger.New(logger.Config{
 		Format: `{"time":"${time}","status":${status},"method":"${method}","path":"${path}","latency":"${latency}","ip":"${ip}","user_agent":"${ua}","error":"${error}"}` + "\n",
 	}))
 
@@ -187,12 +177,12 @@ func main() {
 				"ip":     c.IP(),
 			})
 			defer func() {
-				if err := recover(); err != nil {
-					eventID := hub.RecoverWithContext(c.Context(), err)
+				if recovered := recover(); recovered != nil {
+					eventID := hub.RecoverWithContext(c.Context(), recovered)
 					if eventID != nil {
 						sentry.Flush(2 * time.Second)
 					}
-					panic(err) // re-panic for Fiber's recover middleware
+					panic(recovered) // re-panic for Fiber's recover middleware
 				}
 			}()
 			return c.Next()
@@ -294,15 +284,6 @@ func main() {
 	if err != nil {
 		slog.Error("Failed to register routes (e.g. email templates)", "error", err)
 		os.Exit(1)
-	}
-
-	// 6. Seed admin user if not exists (only in non-production)
-	if !isProductionEnvironment(cfg) {
-		if err := seedAdmin(cfg, db); err != nil {
-			slog.Error("Failed to seed admin user", "error", err)
-		}
-	} else {
-		slog.Info("Production environment - skipping admin user seeding")
 	}
 
 	// Catch-all: return a clean 404 JSON instead of Fiber's default 501.
@@ -428,37 +409,4 @@ func isProductionEnvironment(cfg *env.Config) bool {
 		return true
 	}
 	return false
-}
-
-// seedAdmin seeds the admin user if it doesn't exist
-func seedAdmin(cfg *env.Config, db *gorm.DB) error {
-	// Check if admin already exists
-	userRepo := postgres.NewUserRepository(db)
-	existing, err := userRepo.GetByEmail(cfg.SeedAdminEmail)
-	if err == nil && existing != nil {
-		slog.Info("Admin user already exists, skipping seed", "email", cfg.SeedAdminEmail)
-		return nil
-	}
-
-	// Create admin user
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(cfg.SeedAdminPassword), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("failed to hash password: %w", err)
-	}
-
-	user := &domain.User{
-		ID:       uuid.New(),
-		FullName: "Admin",
-		Email:    cfg.SeedAdminEmail,
-		Password: string(hashedPassword),
-		Role:     domain.RoleSuperAdmin,
-		Status:   domain.StatusActive,
-	}
-
-	if err := userRepo.Create(user); err != nil {
-		return fmt.Errorf("failed to create admin user: %w", err)
-	}
-
-	slog.Info("Admin user seeded successfully", "email", cfg.SeedAdminEmail)
-	return nil
 }
