@@ -117,3 +117,32 @@ func TestAuctionFreeEntranceAvailability(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckoutCharge(t *testing.T) {
+	m := func(s string) Money {
+		v, err := NewMoneyFromString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	fee := m("60")
+	cases := []struct {
+		name  string
+		bids  []Money
+		waive bool
+		want  string
+	}{
+		{"no promo single", []Money{m("1")}, false, "61.00"},
+		{"no promo pack", []Money{m("10.4"), m("11.11")}, false, "141.51"},
+		{"promo single is bid only", []Money{m("1")}, true, "1.00"},
+		{"promo pack pays fee from 2nd bid", []Money{m("10.4"), m("11.11")}, true, "81.51"},
+		{"promo three bids [0,1,2]", []Money{m("1"), m("2"), m("3")}, true, "126.00"},
+		{"empty pack", nil, true, "0.00"},
+	}
+	for _, c := range cases {
+		if got := CheckoutCharge(c.bids, fee, c.waive).String(); got != c.want {
+			t.Errorf("%s: got %s want %s", c.name, got, c.want)
+		}
+	}
+}

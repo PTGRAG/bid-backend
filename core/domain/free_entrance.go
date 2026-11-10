@@ -8,8 +8,9 @@ import (
 // Free-entrance promo
 //
 // When enabled on an auction, the first N joiners (N = FreeEntranceLimit, or everyone when
-// the limit is FreeEntranceUnlimited) skip the entrance fee. They still pay their bid
-// amount(s) through Chapa. Each customer may use the promo on one auction only, ever.
+// the limit is FreeEntranceUnlimited) skip the entrance fee on their FIRST bid (index 0 of the
+// pack). Every further bid in the pack still pays its entrance fee, and all bid amounts are paid
+// through Chapa. Each customer may use the promo on one auction only, ever.
 const (
 	// FreeEntranceUnlimited is the stored limit meaning "all" (no cap on free joiners).
 	FreeEntranceUnlimited = 0
@@ -18,6 +19,22 @@ const (
 	// MaxFreeEntranceLimit is the highest finite limit an admin may set.
 	MaxFreeEntranceLimit = 1_000_000
 )
+
+// CheckoutCharge is the single source of truth for what a join checkout costs. Each bid pays
+// its bid amount plus the entrance fee; when waiveFirst is set the entrance fee of the first
+// bid (index 0) is waived, so the total is sum(bids) + fee*(len(bids)-1). The server computes
+// this; the client's quote is only ever compared via the expectEntranceFree flag.
+func CheckoutCharge(bids []Money, entranceFee Money, waiveFirst bool) Money {
+	total := Zero()
+	for i, b := range bids {
+		total = total.Add(b)
+		if waiveFirst && i == 0 {
+			continue
+		}
+		total = total.Add(entranceFee)
+	}
+	return total
+}
 
 // ErrFreeEntranceUnavailable is returned when a customer expected a free entrance but the
 // slot is gone (taken by someone else, promo disabled, already used on another auction).

@@ -284,7 +284,7 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 	}
 
 	// Free-entrance promo (admin-controlled per auction): when this customer qualifies, the
-	// entrance fee is waived and they pay only their bid amount(s) through Chapa. The server
+	// entrance fee of their first bid is waived; the remaining bids pay fee + bid through Chapa. The server
 	// alone decides; the client only says what total it showed the customer.
 	_, waive, fErr := h.svc.FreeEntranceStatus(auctionID, participantID)
 	if fErr != nil {
@@ -307,16 +307,9 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 
 	txRef := "R-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:20]
 
-	bidsTotal := domain.Zero()
-	for _, bidMoney := range bidPack {
-		bidsTotal = bidsTotal.Add(bidMoney)
-	}
-	chargeAmount := bidsTotal
-	if !waive {
-		for range bidPack {
-			chargeAmount = chargeAmount.Add(a.EntranceFee)
-		}
-	}
+	// Free entrance waives the entrance fee of the FIRST bid only (index 0); every other bid in
+	// the pack still pays fee + bid. Always computed here, never taken from the client.
+	chargeAmount := domain.CheckoutCharge(bidPack, a.EntranceFee, waive)
 
 	if waive {
 		// Atomically reserves the free slot and records the pending checkout.
@@ -412,12 +405,12 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 	if waive {
 		// Informational only; the waiver is read from the ledger row, never from this meta.
 		meta["entrance_waived"] = "true"
-		desc = "Auction bid (free entrance)"
+		desc = "Auction entrance fee and bid (first entrance fee free)"
 	}
 	if len(bidPack) > 1 {
 		desc = fmt.Sprintf("Auction bid pack %d tickets", len(bidPack))
 		if waive {
-			desc = fmt.Sprintf("Auction bid pack %d tickets (free entrance)", len(bidPack))
+			desc = fmt.Sprintf("Auction bid pack %d tickets (first entrance fee free)", len(bidPack))
 		}
 	}
 
