@@ -21,21 +21,77 @@ func (s *Service) CreateAuction(ctx context.Context, a *domain.Auction, createdB
 	if a.MinParticipants <= 0 {
 		a.MinParticipants = defaultMinParticipants
 	}
+	// Free-entrance promo is chosen by the admin (limit 0 = "all"). A new auction never
+	// starts with claimed slots, whatever the caller passed.
+	if err := domain.ValidateFreeEntranceLimit(a.FreeEntranceLimit); err != nil {
+		return domain.NewAppError(422, err.Error(), err)
+	}
+	a.FreeEntranceClaimed = 0
 	if err := s.auctionRepo.Create(a); err != nil {
 		return err
 	}
-	s.logAudit(createdBy, "auction.created", "auction", a.ID.String(), a.Title)
+	s.logAudit(createdBy, "auction.created", "auction", a.ID.String(),
+		fmt.Sprintf("%s | %s", a.Title, describeFreeEntrance(a.FreeEntranceEnabled, a.FreeEntranceLimit)))
 	return nil
+}
+
+// FreeEntranceSettings are the admin-controlled promo fields on an auction update.
+// A nil field means "leave unchanged". Limit 0 means "all".
+type FreeEntranceSettings struct {
+	Enabled *bool
+	Limit   *int
+}
+
+func describeFreeEntrance(enabled bool, limit int) string {
+	if !enabled {
+		return "free_entrance=off"
+	}
+	if limit == domain.FreeEntranceUnlimited {
+		return "free_entrance=on limit=all"
+	}
+	return fmt.Sprintf("free_entrance=on limit=%d", limit)
 }
 
 // UpdateAuction updates mutable fields of an auction.
 func (s *Service) UpdateAuction(ctx context.Context, id uuid.UUID, updates *domain.Auction, actorID uuid.UUID) error {
+	return s.UpdateAuctionWithFreeEntrance(ctx, id, updates, nil, actorID)
+}
+
+// UpdateAuctionWithFreeEntrance updates mutable fields and (optionally) the free-entrance
+// promo in a single validated write, so a rejected promo change never leaves a half-applied edit.
+func (s *Service) UpdateAuctionWithFreeEntrance(
+	ctx context.Context,
+	id uuid.UUID,
+	updates *domain.Auction,
+	free *FreeEntranceSettings,
+	actorID uuid.UUID,
+) error {
 	a, err := s.auctionRepo.GetByID(id)
 	if err != nil {
 		return err
 	}
 	if a.Status == domain.AuctionStatusExecuted || a.Status == domain.AuctionStatusCancelled {
 		return domain.NewAppError(422, "Cannot edit an auction that is already executed or cancelled", nil)
+	}
+	freeChanged := false
+	if free != nil {
+		newEnabled, newLimit := a.FreeEntranceEnabled, a.FreeEntranceLimit
+		if free.Enabled != nil {
+			newEnabled = *free.Enabled
+		}
+		if free.Limit != nil {
+			newLimit = *free.Limit
+		}
+		if err := domain.ValidateFreeEntranceLimit(newLimit); err != nil {
+			return domain.NewAppError(422, err.Error(), err)
+		}
+		// Already-reserved slots are real customers: the cap may not drop below them.
+		if newLimit != domain.FreeEntranceUnlimited && newLimit < a.FreeEntranceClaimed {
+			return domain.NewAppError(422, fmt.Sprintf(
+				"Free entrance limit cannot be lower than the %d spots already claimed", a.FreeEntranceClaimed), nil)
+		}
+		freeChanged = newEnabled != a.FreeEntranceEnabled || newLimit != a.FreeEntranceLimit
+		a.FreeEntranceEnabled, a.FreeEntranceLimit = newEnabled, newLimit
 	}
 	if updates.Title != "" {
 		a.Title = updates.Title
@@ -83,7 +139,11 @@ func (s *Service) UpdateAuction(ctx context.Context, id uuid.UUID, updates *doma
 	if err := s.auctionRepo.Update(a); err != nil {
 		return err
 	}
-	s.logAudit(actorID, "auction.updated", "auction", id.String(), a.Title)
+	detail := a.Title
+	if freeChanged {
+		detail += " | " + describeFreeEntrance(a.FreeEntranceEnabled, a.FreeEntranceLimit)
+	}
+	s.logAudit(actorID, "auction.updated", "auction", id.String(), detail)
 	return nil
 }
 
@@ -179,6 +239,30 @@ func (s *Service) RecordParticipation(
 	transactionID string,
 	feePaid domain.Money,
 ) (*domain.AuctionParticipation, error) {
+	return s.recordParticipation(ctx, auctionID, participantID, transactionID, feePaid, false)
+}
+
+// RecordFreeEntranceParticipation records a participation whose entrance fee was waived by the
+// free-entrance promo. feePaid is what the customer actually paid (their bid amount(s) only).
+// The slot was already reserved at checkout, so nothing is claimed here.
+func (s *Service) RecordFreeEntranceParticipation(
+	ctx context.Context,
+	auctionID uuid.UUID,
+	participantID string,
+	transactionID string,
+	feePaid domain.Money,
+) (*domain.AuctionParticipation, error) {
+	return s.recordParticipation(ctx, auctionID, participantID, transactionID, feePaid, true)
+}
+
+func (s *Service) recordParticipation(
+	ctx context.Context,
+	auctionID uuid.UUID,
+	participantID string,
+	transactionID string,
+	feePaid domain.Money,
+	entranceFree bool,
+) (*domain.AuctionParticipation, error) {
 	if transactionID != "" {
 		if existing, _ := s.participationRepo.GetByTransactionID(transactionID); existing != nil {
 			return existing, nil
@@ -208,6 +292,7 @@ func (s *Service) RecordParticipation(
 		ParticipantID: participantID,
 		TransactionID: transactionID,
 		FeePaid:       feePaid,
+		EntranceFree:  entranceFree,
 		Status:        domain.ParticipationStatusActive,
 	}
 	if err := s.participationRepo.Create(part); err != nil {

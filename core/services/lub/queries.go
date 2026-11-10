@@ -70,6 +70,13 @@ func (s *Service) toPublicAuctionCards(auctions []domain.Auction, viewerID strin
 	if viewerID != "" {
 		joinedMap, _ = s.participationRepo.JoinedAuctionSet(auctionIDs, viewerID)
 	}
+	viewerUsedFree := false
+	if viewerID != "" {
+		var err error
+		if viewerUsedFree, err = s.participationRepo.HasUsedFreeEntrance(viewerID); err != nil {
+			viewerUsedFree = true // unknown -> never promise a free entrance we can't confirm
+		}
+	}
 
 	var maxGrowth int64
 	for i := range auctions {
@@ -82,6 +89,9 @@ func (s *Service) toPublicAuctionCards(auctions []domain.Auction, viewerID strin
 		if viewerID != "" {
 			a.UserHasJoined = joinedMap[a.ID]
 		}
+		a.FreeEntranceRemaining = a.FreeSlotsRemaining()
+		a.FreeEntranceUnlimited = a.FreeEntranceIsUnlimited()
+		a.UserEligibleForFreeEntrance = a.FreeEntranceAvailable() && viewerID != "" && !viewerUsedFree && !a.UserHasJoined
 	}
 
 	cards := make([]domain.PublicAuctionCard, 0, len(auctions))
@@ -106,24 +116,29 @@ func toPublicAuctionCard(a domain.Auction, growth24h, maxGrowth int64, now time.
 	}
 
 	return domain.PublicAuctionCard{
-		ID:               a.ID,
-		Title:            a.Title,
-		Description:      a.Description,
-		ImageURL:         a.ImageURL,
-		ImageURLs:        a.ImageURLs,
-		VideoURL:         a.VideoURL,
-		Status:           a.Status,
-		EntranceFee:      a.EntranceFee,
-		RetailValue:      a.RetailValue,
-		MinParticipants:  minP,
-		ParticipantCount: a.ParticipantCount,
-		CloseAt:          a.CloseAt,
-		EndsAt:           endsAt,
-		CreatedAt:        a.CreatedAt,
-		UserHasJoined:    a.UserHasJoined,
-		Tag:              tag,
-		WinnerName:       winnerName,
-		PrizeUnlocked:    unlocked,
+		ID:                          a.ID,
+		Title:                       a.Title,
+		Description:                 a.Description,
+		ImageURL:                    a.ImageURL,
+		ImageURLs:                   a.ImageURLs,
+		VideoURL:                    a.VideoURL,
+		Status:                      a.Status,
+		EntranceFee:                 a.EntranceFee,
+		RetailValue:                 a.RetailValue,
+		MinParticipants:             minP,
+		ParticipantCount:            a.ParticipantCount,
+		CloseAt:                     a.CloseAt,
+		EndsAt:                      endsAt,
+		CreatedAt:                   a.CreatedAt,
+		UserHasJoined:               a.UserHasJoined,
+		Tag:                         tag,
+		WinnerName:                  winnerName,
+		PrizeUnlocked:               unlocked,
+		FreeEntranceEnabled:         a.FreeEntranceEnabled,
+		FreeEntranceLimit:           a.FreeEntranceLimit,
+		FreeEntranceRemaining:       a.FreeEntranceRemaining,
+		FreeEntranceUnlimited:       a.FreeEntranceUnlimited,
+		UserEligibleForFreeEntrance: a.UserEligibleForFreeEntrance,
 	}
 }
 

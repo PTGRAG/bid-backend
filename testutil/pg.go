@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bid-hub/admin-backend/platform/database"
@@ -75,7 +76,33 @@ func MustStartPostgres(t testing.TB) *PG {
 	return shared
 }
 
+// openExternal connects to an already-running Postgres named by TEST_DATABASE_URL (for hosts
+// without Docker). Reset truncates every table, so the database name must contain "test".
+func openExternal(dsn string) (*PG, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("TEST_DATABASE_URL: %w", err)
+	}
+	// Tests TRUNCATE every table: only ever run against a database that is clearly a test one.
+	if !strings.Contains(strings.ToLower(cfg.Database), "test") {
+		return nil, fmt.Errorf("TEST_DATABASE_URL database %q must contain \"test\" (tests truncate all tables)", cfg.Database)
+	}
+	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger:                                   logger.Default.LogMode(logger.Silent),
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open gorm: %w", err)
+	}
+	database.Migrate(gormDB)
+	return &PG{DB: gormDB}, nil
+}
+
 func startPostgres() (*PG, error) {
+	if dsn := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL")); dsn != "" {
+		return openExternal(dsn)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 

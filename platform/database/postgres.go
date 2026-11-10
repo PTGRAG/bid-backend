@@ -12,6 +12,19 @@ import (
 	"gorm.io/gorm"
 )
 
+// waivedPerUserIndexSQL enforces "one free entrance per customer": a customer may hold at most
+// one pending/successful free-entrance checkout. It is skipped while payments.status is still the
+// legacy varchar (the enum conversion would otherwise trip over the index predicate); Migrate
+// re-applies it after the conversion.
+const waivedPerUserIndexSQL = `DO $$ BEGIN
+	IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'payments' AND column_name = 'status' AND udt_name = 'payment_status')
+	   AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'payments' AND column_name = 'entrance_waived') THEN
+		CREATE UNIQUE INDEX IF NOT EXISTS ux_payments_one_waived_per_user
+			ON payments (user_id)
+			WHERE entrance_waived = true AND status IN ('pending'::payment_status, 'success'::payment_status);
+	END IF;
+END $$;`
+
 // EnsureSafeSchema applies additive, idempotent column patches that production
 // needs even when full AutoMigrate is skipped.
 func EnsureSafeSchema(db *gorm.DB) {
@@ -22,7 +35,16 @@ func EnsureSafeSchema(db *gorm.DB) {
 		`ALTER TABLE auctions ADD COLUMN IF NOT EXISTS image_urls JSONB NOT NULL DEFAULT '[]'::jsonb`,
 		`ALTER TABLE auctions ADD COLUMN IF NOT EXISTS retail_value DECIMAL(12,2) NOT NULL DEFAULT 0`,
 		`ALTER TABLE auctions ADD COLUMN IF NOT EXISTS min_participants INTEGER NOT NULL DEFAULT 10`,
+		// Free-entrance promo is opt-in per auction: existing and new rows default to OFF.
+		`ALTER TABLE auctions ADD COLUMN IF NOT EXISTS free_entrance_enabled BOOLEAN NOT NULL DEFAULT false`,
+		`ALTER TABLE auctions ALTER COLUMN free_entrance_enabled SET DEFAULT false`,
+		`ALTER TABLE auctions ADD COLUMN IF NOT EXISTS free_entrance_limit INTEGER NOT NULL DEFAULT 100`,
+		`ALTER TABLE auctions ADD COLUMN IF NOT EXISTS free_entrance_claimed INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auction_participations ADD COLUMN IF NOT EXISTS entrance_free BOOLEAN NOT NULL DEFAULT false`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_participation_one_free_per_user ON auction_participations (participant_id) WHERE entrance_free = true AND status = 'active'`,
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS bid_values TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS entrance_waived BOOLEAN NOT NULL DEFAULT false`,
+		waivedPerUserIndexSQL,
 		`UPDATE auctions
 		 SET image_urls = jsonb_build_array(image_url)
 		 WHERE (image_urls IS NULL OR image_urls = '[]'::jsonb)
@@ -148,7 +170,18 @@ func Migrate(db *gorm.DB) {
 			ALTER TABLE auctions ADD CONSTRAINT chk_auctions_max_bid_value CHECK (max_bid_value IS NULL OR max_bid_value >= min_bid_value);
 		EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
 
-		// Auction participations constraints
+		// Free-entrance promo bounds: limit is 0 ("all") or 1..1,000,000 and the claimed counter
+		// may never exceed a finite limit or go negative.
+		`DO $$ BEGIN
+			ALTER TABLE auctions ADD CONSTRAINT chk_auctions_free_entrance CHECK (
+				free_entrance_limit >= 0 AND free_entrance_limit <= 1000000
+				AND free_entrance_claimed >= 0
+				AND (free_entrance_limit = 0 OR free_entrance_claimed <= free_entrance_limit)
+			);
+		EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+		waivedPerUserIndexSQL,
+
+		// Auction participations constraints (fee_paid is always > 0: free entrance still pays the bid)
 		`DO $$ BEGIN
 			ALTER TABLE auction_participations ADD CONSTRAINT chk_participations_fee_paid CHECK (fee_paid > 0);
 		EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,

@@ -38,6 +38,15 @@ type Auction struct {
 	MinBidValue     Money  `gorm:"type:decimal(10,2);not null;default:0.01" json:"minBidValue"`
 	MaxBidValue     *Money `gorm:"type:decimal(10,2)"                       json:"maxBidValue,omitempty"`
 
+	// Free entrance promo (admin-controlled per auction): the first N joiners skip the
+	// entrance fee but still pay their bid amount via Chapa. Limit 0 means "all".
+	// Each customer may use the promo on one auction only (enforced in DB).
+	// No gorm defaults on purpose: false / 0 are meaningful and must be written as-is.
+	FreeEntranceEnabled bool `gorm:"not null" json:"freeEntranceEnabled"`
+	FreeEntranceLimit   int  `gorm:"not null" json:"freeEntranceLimit"`
+	// FreeEntranceClaimed counts reserved/used free slots. Only the payment ledger changes it.
+	FreeEntranceClaimed int `gorm:"not null" json:"freeEntranceClaimed"`
+
 	// Schedule
 	StartAt    *time.Time `gorm:"column:start_at"                                                          json:"startAt,omitempty"`
 	CloseAt    *time.Time `gorm:"column:close_at;index:idx_auctions_due_close,priority:2"                  json:"closeAt,omitempty"`
@@ -52,6 +61,9 @@ type Auction struct {
 	ParticipantCount    int64      `gorm:"-"                                               json:"participantCount"`
 	UserHasJoined       bool       `gorm:"-"                                               json:"userHasJoined"`
 	CardTag             string     `gorm:"-"                                               json:"tag,omitempty"` // hot | new | almost_unlocked
+	FreeEntranceRemaining       int  `gorm:"-" json:"freeEntranceRemaining"`
+	FreeEntranceUnlimited       bool `gorm:"-" json:"freeEntranceUnlimited"`
+	UserEligibleForFreeEntrance bool `gorm:"-" json:"userEligibleForFreeEntrance"`
 
 	CreatedBy uuid.UUID `gorm:"type:uuid;not null;index:idx_auctions_created_by" json:"createdBy"`
 	CreatedAt time.Time `gorm:"index:idx_auctions_created_at"                    json:"createdAt"`
@@ -81,6 +93,11 @@ type PublicAuctionCard struct {
 	Tag              string        `json:"tag,omitempty"`
 	WinnerName       string        `json:"winnerName,omitempty"`
 	PrizeUnlocked    bool          `json:"prizeUnlocked"`
+	FreeEntranceEnabled         bool `json:"freeEntranceEnabled"`
+	FreeEntranceLimit           int  `json:"freeEntranceLimit"`
+	FreeEntranceRemaining       int  `json:"freeEntranceRemaining"`
+	FreeEntranceUnlimited       bool `json:"freeEntranceUnlimited"`
+	UserEligibleForFreeEntrance bool `json:"userEligibleForFreeEntrance"`
 }
 
 func (Auction) TableName() string { return "auctions" }

@@ -67,6 +67,7 @@ type mockPartRepo struct {
 	listByAuctFn   func(auctionID uuid.UUID, l, o int) ([]domain.AuctionParticipation, int64, error)
 	updateStatusFn func(id uuid.UUID, s string) error
 	countFn        func(auctionID uuid.UUID) (int64, error)
+	hasUsedFreeFn  func(pid string) (bool, error)
 }
 
 func (m *mockPartRepo) Create(p *domain.AuctionParticipation) error {
@@ -123,6 +124,12 @@ func (m *mockPartRepo) GetCountByMonth(lastMonths int) ([]domain.MonthlyCount, e
 
 func (m *mockPartRepo) JoinedAuctionSet(auctionIDs []uuid.UUID, participantID string) (map[uuid.UUID]bool, error) {
 	return nil, nil
+}
+func (m *mockPartRepo) HasUsedFreeEntrance(participantID string) (bool, error) {
+	if m.hasUsedFreeFn != nil {
+		return m.hasUsedFreeFn(participantID)
+	}
+	return false, nil
 }
 
 type mockBidRepo struct {

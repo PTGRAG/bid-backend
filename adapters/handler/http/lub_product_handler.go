@@ -1,7 +1,9 @@
 package http
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -36,6 +38,10 @@ type CreateAuctionRequest struct {
 	MaxBidValue     *float64 `json:"maxBidValue"     validate:"omitempty,gt=0"`
 	StartAt         *string  `json:"startAt"         validate:"omitempty"`
 	CloseAt         *string  `json:"closeAt"         validate:"omitempty"`
+	// Free-entrance promo. Omitted = off. Limit: number or "100" / "1k" / "all" (see
+	// domain.ParseFreeEntranceLimit); omitted with the promo on = domain.DefaultFreeEntranceLimit.
+	FreeEntranceEnabled *bool           `json:"freeEntranceEnabled"`
+	FreeEntranceLimit   json.RawMessage `json:"freeEntranceLimit"`
 }
 
 type UpdateAuctionRequest struct {
@@ -52,6 +58,37 @@ type UpdateAuctionRequest struct {
 	MaxBidValue     *float64 `json:"maxBidValue"     validate:"omitempty,gt=0"`
 	StartAt         *string  `json:"startAt"         validate:"omitempty"`
 	CloseAt         *string  `json:"closeAt"         validate:"omitempty"`
+	// Free-entrance promo. Omitted fields are left unchanged.
+	FreeEntranceEnabled *bool           `json:"freeEntranceEnabled"`
+	FreeEntranceLimit   json.RawMessage `json:"freeEntranceLimit"`
+}
+
+// parseFreeEntranceLimitField reads the admin "free entrance limit" value, which the staff
+// text box sends as a JSON string ("100", "1k", "all") or a JSON number.
+// provided=false when the field was omitted or null.
+func parseFreeEntranceLimitField(raw json.RawMessage) (limit int, provided bool, err error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return 0, false, nil
+	}
+	var text string
+	if strings.HasPrefix(trimmed, `"`) {
+		if uErr := json.Unmarshal(raw, &text); uErr != nil {
+			return 0, true, fmt.Errorf("free entrance limit must be text or a whole number: %w", domain.ErrInvalidInput)
+		}
+	} else {
+		// A bare JSON number: only plain non-negative integers survive the strict parser
+		// (rejects 1.5, 1e3, -5, ...).
+		text = trimmed
+	}
+	limit, err = domain.ParseFreeEntranceLimit(text)
+	return limit, true, err
+}
+
+func freeEntranceFieldError(c fiber.Ctx, err error) error {
+	msg := err.Error()
+	return validate.FailWithStatus(c, fiber.StatusBadRequest, msg, "BAD_REQUEST",
+		validate.FieldError{Field: "freeEntranceLimit", Rule: "invalid", Message: msg})
 }
 
 func normalizeAuctionImages(cover string, urls []string) (string, []string) {
@@ -105,21 +142,31 @@ func (h *AuctionAdminHandler) Create(c fiber.Ctx) error {
 		return response.Error(c, fiber.StatusBadRequest, "title is required (min 2 chars)", nil)
 	}
 
+	freeLimit, freeLimitProvided, lErr := parseFreeEntranceLimitField(req.FreeEntranceLimit)
+	if lErr != nil {
+		return freeEntranceFieldError(c, lErr)
+	}
+	if !freeLimitProvided {
+		freeLimit = domain.DefaultFreeEntranceLimit
+	}
+
 	cover, images := normalizeAuctionImages(req.ImageURL, req.ImageURLs)
 	minParticipants := req.MinParticipants
 	if minParticipants <= 0 {
 		minParticipants = 10
 	}
 	a := &domain.Auction{
-		Title:           title,
-		Description:     req.Description,
-		ImageURL:        cover,
-		ImageURLs:       images,
-		VideoURL:        req.VideoURL,
-		EntranceFee:     domain.NewMoney(req.EntranceFee),
-		RetailValue:     domain.NewMoney(req.RetailValue),
-		MinParticipants: minParticipants,
-		MinBidValue:     domain.NewMoney(req.MinBidValue),
+		Title:               title,
+		Description:         req.Description,
+		ImageURL:            cover,
+		ImageURLs:           images,
+		VideoURL:            req.VideoURL,
+		EntranceFee:         domain.NewMoney(req.EntranceFee),
+		RetailValue:         domain.NewMoney(req.RetailValue),
+		MinParticipants:     minParticipants,
+		MinBidValue:         domain.NewMoney(req.MinBidValue),
+		FreeEntranceEnabled: req.FreeEntranceEnabled != nil && *req.FreeEntranceEnabled,
+		FreeEntranceLimit:   freeLimit,
 	}
 	if req.MaxBidValue != nil {
 		v := domain.NewMoney(*req.MaxBidValue)
@@ -198,6 +245,11 @@ func (h *AuctionAdminHandler) Update(c fiber.Ctx) error {
 		title = strings.TrimSpace(req.Name)
 	}
 
+	freeLimit, freeLimitProvided, lErr := parseFreeEntranceLimitField(req.FreeEntranceLimit)
+	if lErr != nil {
+		return freeEntranceFieldError(c, lErr)
+	}
+
 	cover, images := normalizeAuctionImages(req.ImageURL, req.ImageURLs)
 	updates := &domain.Auction{
 		Title:           title,
@@ -225,7 +277,15 @@ func (h *AuctionAdminHandler) Update(c fiber.Ctx) error {
 		}
 	}
 
-	if err := h.svc.UpdateAuction(c.Context(), id, updates, actorID); err != nil {
+	var free *lub.FreeEntranceSettings
+	if freeLimitProvided || req.FreeEntranceEnabled != nil {
+		free = &lub.FreeEntranceSettings{Enabled: req.FreeEntranceEnabled}
+		if freeLimitProvided {
+			free.Limit = &freeLimit
+		}
+	}
+
+	if err := h.svc.UpdateAuctionWithFreeEntrance(c.Context(), id, updates, free, actorID); err != nil {
 		return mapLUBError(c, err)
 	}
 	a, _ := h.svc.GetAuctionByID(id)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bid-hub/admin-backend/adapters/repository/postgres"
+	"github.com/bid-hub/admin-backend/core/ports"
 	"github.com/bid-hub/admin-backend/core/services"
 	"github.com/bid-hub/admin-backend/core/services/chapapayment"
 	"github.com/bid-hub/admin-backend/core/services/lub"
@@ -19,6 +20,10 @@ type Stack struct {
 	LUB   *lub.Service
 	Chapa *chapapayment.Service
 	Notif *notifications.Service
+	// Ledger is the payments ledger repository (free-entrance reservations live here).
+	Ledger ports.PaymentLedgerRepository
+	// Auctions is the auction repository.
+	Auctions ports.AuctionRepository
 }
 
 func NewStack(t testing.TB, pg *PG) *Stack {
@@ -56,5 +61,8 @@ func NewStack(t testing.TB, pg *PG) *Stack {
 		LUB:   lubSvc,
 		Chapa: chapaSvc,
 		Notif: notifSvc,
+
+		Ledger:   paymentLedgerRepo,
+		Auctions: auctionRepo,
 	}
 }

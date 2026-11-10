@@ -230,7 +230,7 @@ func registerMiscRoutes(protected fiber.Router, dashboardHandler *DashboardHandl
 
 func registerPublicAuctionRoutes(api fiber.Router, optionalAuth fiber.Handler, publicHandler *AuctionHandler) {
 	api.Get("/public/auctions", optionalAuth, publicHandler.ListPublicAuctions)
-	api.Get("/public/auctions/:id", publicHandler.GetPublicAuction)
+	api.Get("/public/auctions/:id", optionalAuth, publicHandler.GetPublicAuction)
 	api.Get("/public/auctions/:id/audit", publicHandler.GetAuctionAudit)
 	api.Post("/public/auctions/:auctionId/participate", optionalAuth, publicHandler.RecordParticipation)
 	api.Post("/public/bids", optionalAuth, publicHandler.PlaceBid)

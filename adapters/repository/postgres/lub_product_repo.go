@@ -40,7 +40,9 @@ func (r *AuctionRepository) GetByID(id uuid.UUID) (*domain.Auction, error) {
 }
 
 func (r *AuctionRepository) Update(a *domain.Auction) error {
-	return r.db.Save(a).Error
+	// free_entrance_claimed is owned by the payment ledger (atomic reserve/release). Saving a
+	// stale in-memory copy of it would silently corrupt the slot counter.
+	return r.db.Omit("free_entrance_claimed").Save(a).Error
 }
 
 func (r *AuctionRepository) UpdateStatus(id uuid.UUID, status domain.AuctionStatus) error {

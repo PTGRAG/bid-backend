@@ -21,7 +21,7 @@ func NewPaymentLedgerRepository(db *gorm.DB) *PaymentLedgerRepo {
 }
 
 const safePaymentSelect = `id, tx_ref, chapa_reference, user_id, auction_id, participation_id,
-	amount, bid_values, status, processed, retry_disabled, last_error, created_at, updated_at`
+	amount, bid_values, entrance_waived, status, processed, retry_disabled, last_error, created_at, updated_at`
 
 const paymentStaffEnrichSelect = safePaymentSelect + `,
 	participant_users.full_name AS participant_name,
@@ -264,15 +264,38 @@ func (r *PaymentLedgerRepo) SetChapaReference(ctx context.Context, txRef string,
 }
 
 func (r *PaymentLedgerRepo) MarkRefunded(ctx context.Context, txRef string) error {
-	return r.db.WithContext(ctx).Model(&domain.Payment{}).
-		Where("tx_ref = ?", txRef).
-		Updates(map[string]interface{}{
-			"status":         domain.PaymentStatusRefunded,
-			"processed":      true,
-			"retry_disabled": true,
-			"last_error":     "",
-			"updated_at":     time.Now(),
-		}).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var prev struct {
+			AuctionID      *uuid.UUID `gorm:"column:auction_id"`
+			EntranceWaived bool       `gorm:"column:entrance_waived"`
+			Status         string     `gorm:"column:status"`
+		}
+		if err := tx.Raw(`
+			SELECT auction_id, entrance_waived, status FROM payments
+			WHERE tx_ref = ? FOR UPDATE`, txRef).Scan(&prev).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&domain.Payment{}).
+			Where("tx_ref = ?", txRef).
+			Updates(map[string]interface{}{
+				"status":         domain.PaymentStatusRefunded,
+				"processed":      true,
+				"retry_disabled": true,
+				"last_error":     "",
+				"updated_at":     time.Now(),
+			}).Error; err != nil {
+			return err
+		}
+
+		// A refunded free-entrance payment no longer holds a slot (and the customer may use
+		// their one free entrance again, since the refunded row leaves the unique index).
+		holdsSlot := prev.Status == domain.PaymentStatusPending || prev.Status == domain.PaymentStatusSuccess
+		if prev.EntranceWaived && holdsSlot && prev.AuctionID != nil {
+			return releaseAuctionSlot(tx, *prev.AuctionID)
+		}
+		return nil
+	})
 }
 
 func (r *PaymentLedgerRepo) SetLastError(ctx context.Context, txRef string, msg string) error {

@@ -296,6 +296,14 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 	chapaOK := strings.EqualFold(strings.TrimSpace(snap.APIStatus), "success") &&
 		strings.EqualFold(strings.TrimSpace(snap.DataStatus), "success")
 
+	// The entrance waiver is decided server-side at checkout and stored on the ledger row.
+	// Never derive it from Chapa meta or the request.
+	checkoutRow, rowErr := s.repo.GetByTxRef(ctx, txRef)
+	if rowErr != nil && !errors.Is(rowErr, domain.ErrNotFound) {
+		return fmt.Errorf("payment ledger lookup: %w", rowErr)
+	}
+	waived := checkoutRow != nil && checkoutRow.EntranceWaived
+
 	auctionID, userID, pricePaid, parseErr := parseParticipationMeta(snap)
 	if parseErr != nil {
 		existing, lookupErr := s.repo.GetByTxRef(ctx, txRef)
@@ -330,6 +338,12 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 
 	if !chapaOK {
 		reason := fmt.Sprintf("chapa verify status not success (api=%q data=%q)", snap.APIStatus, snap.DataStatus)
+		if waived {
+			// Give the free-entrance slot back in the same step that fails the payment.
+			if _, fErr := s.repo.FailPendingWaived(ctx, txRef, reason); fErr != nil {
+				return fmt.Errorf("release free entrance reservation: %w", fErr)
+			}
+		}
 		p := &domain.Payment{
 			TxRef:     txRef,
 			UserID:    ptrUUID(userID),
@@ -349,6 +363,25 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 		s.capturePaymentIssue(txRef, "chapa_not_success", nil)
 		s.notifyBuyerAndAdminFailure(ctx, txRef, userID.String(), auctionID, reason)
 		return nil
+	}
+
+	if waived && checkoutRow.Status == domain.PaymentStatusFailed {
+		// The checkout was released (abandoned / superseded / reported not-success) yet the
+		// customer did pay. Try to take the slot back; if it is gone, fulfil as a normal
+		// participation and flag the entrance-fee shortfall for staff.
+		reopened, rErr := s.repo.ReopenWaivedReservation(ctx, txRef)
+		if rErr != nil {
+			return fmt.Errorf("reopen free entrance reservation: %w", rErr)
+		}
+		if !reopened {
+			waived = false
+			s.log.Warn("chapa_waived_reservation_lost", "tx_ref", txRef, "auction_id", auctionID.String(), "user_id", userID.String())
+			s.capturePaymentIssue(txRef, "waived_reservation_lost", nil)
+			s.alertAdmin(ctx, fmt.Sprintf(
+				"⚠️ Free-entrance checkout paid after its slot was released\ntx_ref: %s\nauction: %s\nuser: %s\npaid: %s ETB (entrance fee not collected)",
+				txRef, auctionID.String(), userID.String(), pricePaid.String(),
+			))
+		}
 	}
 
 	p := &domain.Payment{
@@ -377,7 +410,11 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 		return nil
 	}
 
-	part, err := s.lubSvc.RecordParticipation(ctx, auctionID, userID.String(), txRef, pricePaid)
+	record := s.lubSvc.RecordParticipation
+	if waived {
+		record = s.lubSvc.RecordFreeEntranceParticipation
+	}
+	part, err := record(ctx, auctionID, userID.String(), txRef, pricePaid)
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) {
 			s.placePendingBidsIfNeeded(ctx, txRef, auctionID, userID.String(), snap)
@@ -477,7 +514,11 @@ func (s *Service) tryFulfillPayment(ctx context.Context, p *domain.Payment) bool
 		}
 		return true
 	}
-	_, err := s.lubSvc.RecordParticipation(ctx, *p.AuctionID, p.UserID.String(), txRef, p.Amount)
+	record := s.lubSvc.RecordParticipation
+	if p.EntranceWaived {
+		record = s.lubSvc.RecordFreeEntranceParticipation
+	}
+	_, err := record(ctx, *p.AuctionID, p.UserID.String(), txRef, p.Amount)
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) {
 			s.placePendingBidsIfNeeded(ctx, txRef, *p.AuctionID, p.UserID.String(), nil)
@@ -564,6 +605,98 @@ func (s *Service) CreatePendingPayment(ctx context.Context, txRef string, userID
 	return nil
 }
 
+const (
+	// waivedCheckoutTTL is how long an unpaid free-entrance checkout may hold its slot.
+	waivedCheckoutTTL = 2 * time.Hour
+	// waivedUnverifiableGrace is how long we wait before treating a checkout Chapa cannot
+	// verify at all (never initialised / unknown) as abandoned.
+	waivedUnverifiableGrace = 30 * time.Minute
+)
+
+// CreateWaivedPendingPayment records a checkout whose entrance fee is waived by the free-entrance
+// promo. amount must be the bid total only. The slot reservation and the ledger row are created
+// in one transaction; domain.ErrFreeEntranceUnavailable means the slot is no longer available.
+func (s *Service) CreateWaivedPendingPayment(ctx context.Context, txRef string, userID, auctionID uuid.UUID, amount domain.Money, bidValues ...domain.Money) error {
+	p := &domain.Payment{
+		TxRef:     txRef,
+		UserID:    ptrUUID(userID),
+		AuctionID: ptrUUID(auctionID),
+		Amount:    amount,
+		BidValues: encodeBidValues(bidValues),
+		Status:    domain.PaymentStatusPending,
+	}
+	if err := s.repo.CreateWaivedPending(ctx, p); err != nil {
+		if errors.Is(err, domain.ErrFreeEntranceUnavailable) {
+			return err
+		}
+		return fmt.Errorf("chapa: create waived pending payment: %w", err)
+	}
+	if len(bidValues) > 0 {
+		s.SetPendingBids(txRef, bidValues)
+	}
+	s.log.Info("chapa_waived_pending_payment_created", "tx_ref", txRef, "user_id", userID, "auction_id", auctionID, "amount", amount.String(), "bid_values", p.BidValues)
+	return nil
+}
+
+// AbortWaivedCheckout releases the free-entrance slot of a checkout that never reached Chapa
+// (e.g. initialisation failed), so the customer and the auction are not left holding it.
+func (s *Service) AbortWaivedCheckout(ctx context.Context, txRef, reason string) {
+	released, err := s.repo.FailPendingWaived(ctx, txRef, reason)
+	if err != nil {
+		s.log.Error("chapa_waived_abort_failed", "tx_ref", txRef, "error", err)
+		return
+	}
+	if released {
+		s.log.Info("chapa_waived_checkout_aborted", "tx_ref", txRef, "reason", reason)
+	}
+}
+
+// SettleStaleWaivedCheckouts resolves the customer's earlier in-flight free-entrance checkouts
+// before a new one is reserved (one free entrance per customer at a time). Each earlier checkout
+// is verified with Chapa: if it was actually paid it is fulfilled; otherwise it is released.
+func (s *Service) SettleStaleWaivedCheckouts(ctx context.Context, userID uuid.UUID) error {
+	rows, err := s.repo.ListPendingWaivedByUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		row := rows[i]
+		if s.chapa == nil {
+			return domain.NewAppError(503, "Payment gateway is not available right now. Please try again shortly.", nil)
+		}
+		snap, vErr := s.chapa.VerifyTransaction(row.TxRef)
+		if vErr != nil {
+			if time.Since(row.CreatedAt) < waivedUnverifiableGrace {
+				return domain.NewAppError(409,
+					"You have a free-entrance payment in progress. Finish it, or try again in a few minutes.", vErr)
+			}
+			s.AbortWaivedCheckout(ctx, row.TxRef, "abandoned: unverifiable at Chapa")
+			continue
+		}
+
+		status := strings.TrimSpace(snap.Status)
+		if strings.EqualFold(status, "success") {
+			verified := &VerifiedSnapshot{
+				TxRef:          row.TxRef,
+				ChapaReference: snap.Reference,
+				APIStatus:      "success",
+				DataStatus:     status,
+				Amount:         snap.Amount,
+				Meta:           NormalizeChapaMeta(snap.Meta),
+				CustomerEmail:  snap.CustomerEmail,
+				CustomerFirst:  snap.CustomerFirst,
+				BidValues:      decodeBidValues(row.BidValues),
+			}
+			if pErr := s.ProcessVerified(ctx, verified); pErr != nil && !errors.Is(pErr, ErrFulfillmentDeferred) {
+				return pErr
+			}
+			continue
+		}
+		s.AbortWaivedCheckout(ctx, row.TxRef, "superseded by a new checkout")
+	}
+	return nil
+}
+
 func (s *Service) RetryUnprocessedPayments(ctx context.Context, limit int) (int, error) {
 	rows, err := s.repo.ListSuccessUnprocessed(ctx, limit)
 	if err != nil {
@@ -597,10 +730,18 @@ func (s *Service) ReconcilePendingPayments(ctx context.Context, olderThan time.D
 		snap, vErr := s.chapa.VerifyTransaction(txRef)
 		if vErr != nil {
 			s.log.Warn("chapa_reconcile_verify_failed", "tx_ref", txRef, "error", vErr)
+			// Chapa still can't see this checkout a day later: it was never paid. Free the slot.
+			if rows[i].EntranceWaived && time.Since(rows[i].CreatedAt) > 24*time.Hour {
+				s.AbortWaivedCheckout(ctx, txRef, "expired: checkout unknown to Chapa")
+			}
 			continue
 		}
 		status := strings.TrimSpace(snap.Status)
 		if strings.EqualFold(status, "pending") || strings.EqualFold(status, "created") {
+			// An unpaid free-entrance checkout must not hold a slot forever.
+			if rows[i].EntranceWaived && time.Since(rows[i].CreatedAt) > waivedCheckoutTTL {
+				s.AbortWaivedCheckout(ctx, txRef, "expired: unpaid free-entrance checkout")
+			}
 			continue
 		}
 		verified := &VerifiedSnapshot{

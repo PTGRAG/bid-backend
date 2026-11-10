@@ -35,6 +35,11 @@ type AuctionOpts struct {
 	MinBidValue domain.Money
 	MaxBidValue *domain.Money
 	StartInPast bool
+
+	// Free-entrance promo (off by default, like production).
+	FreeEntranceEnabled bool
+	FreeEntranceLimit   int // 0 = "all"
+	FreeEntranceClaimed int
 }
 
 func SeedAuction(t testing.TB, pg *PG, opts AuctionOpts) *domain.Auction {
@@ -65,6 +70,10 @@ func SeedAuction(t testing.TB, pg *PG, opts AuctionOpts) *domain.Auction {
 		StartAt:     start,
 		CloseAt:     &closeAt,
 		CreatedBy:   uuid.New(),
+
+		FreeEntranceEnabled: opts.FreeEntranceEnabled,
+		FreeEntranceLimit:   opts.FreeEntranceLimit,
+		FreeEntranceClaimed: opts.FreeEntranceClaimed,
 	}
 	if err := pg.DB.Create(a).Error; err != nil {
 		t.Fatalf("SeedAuction: %v", err)

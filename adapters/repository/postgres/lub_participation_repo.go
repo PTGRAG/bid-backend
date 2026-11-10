@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/bid-hub/admin-backend/core/domain"
@@ -132,6 +133,17 @@ func (r *AuctionParticipationRepository) CountByAuctionsSince(auctionIDs []uuid.
 		out[row.AuctionID] = row.Total
 	}
 	return out, nil
+}
+
+func (r *AuctionParticipationRepository) HasUsedFreeEntrance(participantID string) (bool, error) {
+	if strings.TrimSpace(participantID) == "" {
+		return false, nil
+	}
+	var count int64
+	err := r.db.Model(&domain.AuctionParticipation{}).
+		Where("participant_id = ? AND entrance_free = true AND status = ?", participantID, domain.ParticipationStatusActive).
+		Count(&count).Error
+	return count > 0, err
 }
 
 func (r *AuctionParticipationRepository) JoinedAuctionSet(auctionIDs []uuid.UUID, participantID string) (map[uuid.UUID]bool, error) {

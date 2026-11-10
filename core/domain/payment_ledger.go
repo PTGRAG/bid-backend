@@ -21,6 +21,10 @@ type Payment struct {
 	// BidValues persists the bid pack (underscore-separated) so Chapa webhooks / other
 	// replicas can place bids without relying on in-memory pendingBids.
 	BidValues       string     `gorm:"type:text;column:bid_values"                                                             json:"bidValues,omitempty"`
+	// EntranceWaived marks a checkout that reserved a free-entrance slot: the customer pays
+	// the bid amount(s) only. Set once at checkout from server-side eligibility (never from
+	// client or Chapa meta). While pending/success it is unique per user (partial index).
+	EntranceWaived  bool       `gorm:"not null;default:false"                                                                  json:"entranceWaived"`
 	Status          string     `gorm:"type:payment_status;not null;default:'pending';index:idx_payments_unprocessed,priority:1" json:"status"`
 	Processed       bool       `gorm:"not null;default:false;index:idx_payments_unprocessed,priority:2"                        json:"processed"`
 	RetryDisabled   bool       `gorm:"not null;default:false;index:idx_payments_unprocessed,priority:3"                        json:"retryDisabled"`
