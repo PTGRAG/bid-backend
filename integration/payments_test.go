@@ -149,6 +149,46 @@ func TestChapaWebhook_VerifyStatusNotSuccess_RecordsFailureNoParticipation(t *te
 	}
 }
 
+// Chapa answers "pending" while the customer is still on the checkout page (and right after
+// the return redirect). That must not mark the payment failed or send a "payment failed" SMS.
+func TestChapaVerify_PendingIsNotAFailure_AndLaterSuccessStillFulfils(t *testing.T) {
+	s := stack(t)
+	a := testutil.SeedAuction(t, s.PG, testutil.AuctionOpts{
+		Status:      domain.AuctionStatusActive,
+		EntranceFee: domain.NewMoney(10),
+		StartInPast: true,
+	})
+	userID := testutil.SeedParticipant(t, s.PG, domain.Zero())
+	tx := "TXREF-PENDING-" + uuid.New().String()[:8]
+	if err := s.Chapa.CreatePendingPayment(context.Background(), tx, userID, a.ID, domain.NewMoney(10)); err != nil {
+		t.Fatalf("pending payment: %v", err)
+	}
+
+	pending := chapaSnap(tx, a.ID, userID, "10")
+	pending.DataStatus = "pending"
+	if err := s.Chapa.ProcessVerified(context.Background(), pending); err != nil {
+		t.Fatalf("ProcessVerified(pending): %v", err)
+	}
+	var p domain.Payment
+	if err := s.PG.DB.Where("tx_ref = ?", tx).First(&p).Error; err != nil {
+		t.Fatal(err)
+	}
+	if p.Status != domain.PaymentStatusPending || p.Processed {
+		t.Fatalf("pending verify must leave the row pending/unprocessed, got status=%s processed=%v", p.Status, p.Processed)
+	}
+	if part, _ := s.LUB.GetParticipation(a.ID, userID.String()); part != nil {
+		t.Fatalf("no participation while pending")
+	}
+
+	paid := chapaSnap(tx, a.ID, userID, "10")
+	if err := s.Chapa.ProcessVerified(context.Background(), paid); err != nil {
+		t.Fatalf("ProcessVerified(success): %v", err)
+	}
+	if part, _ := s.LUB.GetParticipation(a.ID, userID.String()); part == nil {
+		t.Fatalf("later success must fulfil the participation")
+	}
+}
+
 func TestChapaWebhook_MetaMissing_RecordsFailureNoParticipation(t *testing.T) {
 	s := stack(t)
 	tx := "TXREF-NOMETA-" + uuid.New().String()[:8]

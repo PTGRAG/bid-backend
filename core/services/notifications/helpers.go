@@ -13,13 +13,18 @@ func participationNotificationCopy(productName string, feePaid domain.Money) (ti
 		domain.NotificationPriorityHigh
 }
 
-func participationSMSCopy(productName string, feePaid domain.Money, txRef string) string {
-	msg := fmt.Sprintf("CarraMarket: %s ETB paid for '%s'. Ticket confirmed — open the app to bid.", feePaid.String(), productName)
-	if txRef != "" {
-		msg = fmt.Sprintf("%s Ref:%s", msg, txRef)
-	}
+// participationSMSURL is the link customers get in the ticket-purchase SMS (no tx ref).
+const participationSMSURL = "carramarket.com"
+
+func participationSMSCopy(productName string, feePaid domain.Money, _ string) string {
+	msg := fmt.Sprintf("CarraMarket: %s ETB paid for '%s'. Ticket confirmed. Place your bids: %s", feePaid.String(), productName, participationSMSURL)
 	if len(msg) > 300 {
-		msg = msg[:297] + "..."
+		// Trim the product name, never the link.
+		over := len(msg) - 300 + 3
+		if over < len(productName) {
+			productName = productName[:len(productName)-over] + "..."
+			msg = fmt.Sprintf("CarraMarket: %s ETB paid for '%s'. Ticket confirmed. Place your bids: %s", feePaid.String(), productName, participationSMSURL)
+		}
 	}
 	return msg
 }

@@ -287,6 +287,16 @@ func (s *Service) placePendingBidsIfNeeded(ctx context.Context, txRef string, au
 	}
 }
 
+// IsChapaStatusInFlight reports whether a Chapa transaction status means "not finished yet"
+// (customer still paying / settling) as opposed to a definite failure.
+func IsChapaStatusInFlight(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pending", "created", "processing", "initiated":
+		return true
+	}
+	return false
+}
+
 func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) error {
 	txRef := strings.TrimSpace(snap.TxRef)
 	if txRef == "" {
@@ -295,6 +305,16 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 
 	chapaOK := strings.EqualFold(strings.TrimSpace(snap.APIStatus), "success") &&
 		strings.EqualFold(strings.TrimSpace(snap.DataStatus), "success")
+
+	// Chapa reports "pending" while the customer is still on the checkout page or the payment is
+	// settling (the return URL and webhook can both arrive before it is final). That is not a
+	// failure: leave the ledger row pending (the reconciler / a later webhook settles it) and send
+	// no "payment failed" message.
+	if !chapaOK && strings.EqualFold(strings.TrimSpace(snap.APIStatus), "success") &&
+		IsChapaStatusInFlight(snap.DataStatus) {
+		s.log.Info("chapa_payment_still_pending", "tx_ref", txRef, "data_status", snap.DataStatus)
+		return nil
+	}
 
 	// The entrance waiver is decided server-side at checkout and stored on the ledger row.
 	// Never derive it from Chapa meta or the request.
@@ -737,7 +757,7 @@ func (s *Service) ReconcilePendingPayments(ctx context.Context, olderThan time.D
 			continue
 		}
 		status := strings.TrimSpace(snap.Status)
-		if strings.EqualFold(status, "pending") || strings.EqualFold(status, "created") {
+		if IsChapaStatusInFlight(status) {
 			// An unpaid free-entrance checkout must not hold a slot forever.
 			if rows[i].EntranceWaived && time.Since(rows[i].CreatedAt) > waivedCheckoutTTL {
 				s.AbortWaivedCheckout(ctx, txRef, "expired: unpaid free-entrance checkout")
