@@ -35,7 +35,7 @@ const paymentStaffEnrichSelect = safePaymentSelectQualified + `,
 		SELECT 1 FROM auction_participations ap WHERE ap.transaction_id = payments.tx_ref
 	) AS has_participation,
 	COALESCE((
-		SELECT rr.status FROM refund_records rr
+		SELECT rr.status::text FROM refund_records rr
 		WHERE rr.tx_ref = payments.tx_ref
 		ORDER BY rr.created_at DESC
 		LIMIT 1
