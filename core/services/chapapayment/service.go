@@ -628,10 +628,56 @@ func (s *Service) CreatePendingPayment(ctx context.Context, txRef string, userID
 const (
 	// waivedCheckoutTTL is how long an unpaid free-entrance checkout may hold its slot.
 	waivedCheckoutTTL = 2 * time.Hour
+	// abandonedCheckoutTTL is how long a pending checkout may keep being re-verified when
+	// Chapa answers "Invalid transaction reference" / not found. After this the row is failed
+	// so the reconciler stops hammering the same dead refs every minute.
+	abandonedCheckoutTTL = 2 * time.Hour
 	// waivedUnverifiableGrace is how long we wait before treating a checkout Chapa cannot
-	// verify at all (never initialised / unknown) as abandoned.
+	// verify at all (never initialised / unknown) as abandoned during a live settle.
 	waivedUnverifiableGrace = 30 * time.Minute
 )
+
+// isChapaUnknownTx reports a verify response that means Chapa has no record of this tx_ref
+// (checkout never initialised, wrong key/env, or abandoned before Chapa created it).
+func isChapaUnknownTx(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "invalid transaction reference") ||
+		strings.Contains(msg, "transaction not found")
+}
+
+// AbortAbandonedCheckout marks a still-pending checkout failed once Chapa will never settle
+// it. Waived checkouts also release their free-entrance slot.
+func (s *Service) AbortAbandonedCheckout(ctx context.Context, p *domain.Payment, reason string) {
+	if p == nil {
+		return
+	}
+	txRef := strings.TrimSpace(p.TxRef)
+	if txRef == "" {
+		return
+	}
+	if p.EntranceWaived {
+		s.AbortWaivedCheckout(ctx, txRef, reason)
+		return
+	}
+	failed := &domain.Payment{
+		TxRef:     txRef,
+		UserID:    p.UserID,
+		AuctionID: p.AuctionID,
+		Amount:    p.Amount,
+		BidValues: p.BidValues,
+		Status:    domain.PaymentStatusFailed,
+		Processed: true,
+		LastError: reason,
+	}
+	if err := s.repo.Upsert(ctx, failed); err != nil {
+		s.log.Error("chapa_abandon_pending_failed", "tx_ref", txRef, "error", err)
+		return
+	}
+	s.log.Info("chapa_abandoned_checkout_failed", "tx_ref", txRef, "reason", reason)
+}
 
 // CreateWaivedPendingPayment records a checkout whose entrance fee is waived by the free-entrance
 // promo. amount must be the bid total only. The slot reservation and the ledger row are created
@@ -750,9 +796,14 @@ func (s *Service) ReconcilePendingPayments(ctx context.Context, olderThan time.D
 		snap, vErr := s.chapa.VerifyTransaction(txRef)
 		if vErr != nil {
 			s.log.Warn("chapa_reconcile_verify_failed", "tx_ref", txRef, "error", vErr)
-			// Chapa still can't see this checkout a day later: it was never paid. Free the slot.
-			if rows[i].EntranceWaived && time.Since(rows[i].CreatedAt) > 24*time.Hour {
-				s.AbortWaivedCheckout(ctx, txRef, "expired: checkout unknown to Chapa")
+			age := time.Since(rows[i].CreatedAt)
+			switch {
+			case isChapaUnknownTx(vErr) && age > abandonedCheckoutTTL:
+				// Chapa has no record of this ref: stop retrying every minute.
+				s.AbortAbandonedCheckout(ctx, &rows[i], "expired: checkout unknown to Chapa")
+			case rows[i].EntranceWaived && age > 24*time.Hour:
+				// Transient verify errors for a free-entrance hold: give the slot back eventually.
+				s.AbortWaivedCheckout(ctx, txRef, "expired: checkout unverifiable at Chapa")
 			}
 			continue
 		}
