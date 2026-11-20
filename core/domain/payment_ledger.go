@@ -25,6 +25,10 @@ type Payment struct {
 	// the bid amount(s) only. Set once at checkout from server-side eligibility (never from
 	// client or Chapa meta). While pending/success it is unique per user (partial index).
 	EntranceWaived  bool       `gorm:"not null;default:false"                                                                  json:"entranceWaived"`
+	// Purpose is "entry" (ticket checkout, entrance fees only) or "winner" (the winner paying
+	// their bid amount after the draw). Set once at checkout; never changed afterwards.
+	Purpose         string     `gorm:"type:varchar(20);not null;default:'entry'"                                               json:"purpose"`
+	WinnerOfferID   *uuid.UUID `gorm:"type:uuid;index:idx_payments_winner_offer"                                               json:"winnerOfferId,omitempty"`
 	Status          string     `gorm:"type:payment_status;not null;default:'pending';index:idx_payments_unprocessed,priority:1" json:"status"`
 	Processed       bool       `gorm:"not null;default:false;index:idx_payments_unprocessed,priority:2"                        json:"processed"`
 	RetryDisabled   bool       `gorm:"not null;default:false;index:idx_payments_unprocessed,priority:3"                        json:"retryDisabled"`

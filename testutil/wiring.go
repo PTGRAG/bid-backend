@@ -3,7 +3,9 @@
 package testutil
 
 import (
+	"context"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/bid-hub/admin-backend/adapters/repository/postgres"
@@ -24,6 +26,29 @@ type Stack struct {
 	Ledger ports.PaymentLedgerRepository
 	// Auctions is the auction repository.
 	Auctions ports.AuctionRepository
+	// WinnerOffers is the pay-only-if-you-win offers repository.
+	WinnerOffers ports.WinnerOfferRepository
+	// Admin records staff alerts (Telegram admin chat in production).
+	Admin *AdminRecorder
+}
+
+// AdminRecorder is an in-memory ports.AdminNotifier.
+type AdminRecorder struct {
+	mu   sync.Mutex
+	Msgs []string
+}
+
+func (a *AdminRecorder) NotifyAdmin(_ context.Context, text string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Msgs = append(a.Msgs, text)
+}
+
+// Messages returns a copy of the alerts sent so far.
+func (a *AdminRecorder) Messages() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.Msgs...)
 }
 
 func NewStack(t testing.TB, pg *PG) *Stack {
@@ -55,6 +80,14 @@ func NewStack(t testing.TB, pg *PG) *Stack {
 		paymentLedgerRepo, lubSvc, participantUserRepo, notifSvc, slog.Default(),
 	)
 
+	admin := &AdminRecorder{}
+	winnerOffers := postgres.NewWinnerOfferRepository(db)
+	lubSvc.SetWinnerOffers(winnerOffers)
+	lubSvc.SetAdminNotifier(admin)
+	lubSvc.SetWinnerPaymentChecker(chapaSvc)
+	lubSvc.SetContactLookup(notifSvc)
+	chapaSvc.SetAdminNotifier(admin)
+
 	return &Stack{
 		PG:    pg,
 		Audit: auditSvc,
@@ -62,7 +95,9 @@ func NewStack(t testing.TB, pg *PG) *Stack {
 		Chapa: chapaSvc,
 		Notif: notifSvc,
 
-		Ledger:   paymentLedgerRepo,
-		Auctions: auctionRepo,
+		Ledger:       paymentLedgerRepo,
+		Auctions:     auctionRepo,
+		WinnerOffers: winnerOffers,
+		Admin:        admin,
 	}
 }

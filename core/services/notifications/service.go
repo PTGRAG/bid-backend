@@ -26,6 +26,7 @@ type Service struct {
 	smsSvc              ports.SmsService
 	telegram            ports.TelegramUserMessenger
 	log                 *slog.Logger
+	appURL              string // public site URL for SMS / email links
 }
 
 func NewService(

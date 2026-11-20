@@ -33,6 +33,11 @@ type User struct {
 	TelegramUsername string `gorm:"type:varchar(100);index:idx_users_tg_user" json:"telegramUsername,omitempty"`
 	JoinedVia        string `gorm:"type:varchar(30);default:'web'"            json:"joinedVia"`
 
+	// Opt-in result messages for auctions the user did not win. The in-app notification is
+	// always sent; these add an email and/or a Telegram DM. Winners are always told everywhere.
+	NotifyResultsEmail    bool `gorm:"not null;default:false" json:"notifyResultsEmail"`
+	NotifyResultsTelegram bool `gorm:"not null;default:false" json:"notifyResultsTelegram"`
+
 	Role      UserRole       `gorm:"type:varchar(20);not null;index:idx_users_role_status,priority:1" json:"role"`
 	Status    UserStatus     `gorm:"type:user_status;not null;default:'active';index:idx_users_role_status,priority:2" json:"status"`
 	CreatedAt time.Time      `json:"createdAt"`

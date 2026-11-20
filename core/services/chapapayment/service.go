@@ -329,6 +329,10 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 	}
 	waived := checkoutRow != nil && checkoutRow.EntranceWaived
 
+	if checkoutRow != nil && checkoutRow.Purpose == domain.PaymentPurposeWinner {
+		return s.processWinnerVerified(ctx, snap, checkoutRow, chapaOK)
+	}
+
 	auctionID, userID, pricePaid, parseErr := parseParticipationMeta(snap)
 	if parseErr != nil {
 		existing, lookupErr := s.repo.GetByTxRef(ctx, txRef)
@@ -426,6 +430,12 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 		s.metrics.RecordPaymentSuccess(pricePaid.Float64())
 	}
 
+	return s.fulfillEntry(ctx, p, auctionID, userID, pricePaid, waived, snap)
+}
+
+// fulfillEntry records the participation for a successful ticket checkout and places its bids.
+func (s *Service) fulfillEntry(ctx context.Context, p *domain.Payment, auctionID, userID uuid.UUID, pricePaid domain.Money, waived bool, snap *VerifiedSnapshot) error {
+	txRef := p.TxRef
 	if existingPart, err := s.lubSvc.GetParticipation(auctionID, userID.String()); err == nil && existingPart != nil && existingPart.Status == domain.ParticipationStatusActive {
 		s.placePendingBidsIfNeeded(ctx, txRef, auctionID, userID.String(), snap)
 		if err := s.repo.MarkProcessed(ctx, txRef); err != nil {
@@ -531,6 +541,9 @@ func (s *Service) tryFulfillPayment(ctx context.Context, p *domain.Payment) bool
 		return false
 	}
 	txRef := p.TxRef
+	if p.Purpose == domain.PaymentPurposeWinner {
+		return s.fulfillWinner(ctx, p)
+	}
 	if existingPart, err := s.lubSvc.GetParticipation(*p.AuctionID, p.UserID.String()); err == nil && existingPart != nil && existingPart.Status == domain.ParticipationStatusActive {
 		s.placePendingBidsIfNeeded(ctx, txRef, *p.AuctionID, p.UserID.String(), nil)
 		if err := s.repo.MarkProcessed(ctx, txRef); err != nil {
@@ -585,6 +598,9 @@ func (s *Service) EnsureBidsForPayment(ctx context.Context, txRef string) {
 	p, err := s.repo.GetByTxRef(ctx, txRef)
 	if err != nil || p == nil || p.UserID == nil || p.AuctionID == nil {
 		return
+	}
+	if p.Purpose == domain.PaymentPurposeWinner {
+		return // a winner payment carries no bids
 	}
 	snap := &VerifiedSnapshot{TxRef: txRef}
 	s.placePendingBidsIfNeeded(ctx, txRef, *p.AuctionID, p.UserID.String(), snap)

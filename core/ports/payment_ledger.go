@@ -45,6 +45,9 @@ type PaymentLedgerRepository interface {
 	ReopenWaivedReservation(ctx context.Context, txRef string) (ok bool, err error)
 	// ListPendingWaivedByUser returns the customer's in-flight free-entrance checkouts.
 	ListPendingWaivedByUser(ctx context.Context, userID uuid.UUID) ([]domain.Payment, error)
+	// HasPendingForOffer reports whether a winner payment for offerID created at or after since
+	// is still pending.
+	HasPendingForOffer(ctx context.Context, offerID uuid.UUID, since time.Time) (bool, error)
 	SetChapaReference(ctx context.Context, txRef string, chapaReference string) error
 	SetLastError(ctx context.Context, txRef string, msg string) error
 	// SetFulfillmentFailure stores the error and disables automatic retry when the failure is final.

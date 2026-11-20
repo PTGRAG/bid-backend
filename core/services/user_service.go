@@ -180,6 +180,32 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID uuid.UUID, fullN
 	return nil
 }
 
+// UpdateNotificationPreferences sets the opt-in result messages (email / Telegram DM) for
+// auctions the user did not win. A nil value leaves that setting unchanged.
+func (s *UserService) UpdateNotificationPreferences(userID uuid.UUID, resultsEmail, resultsTelegram *bool, auditCtx *domain.AuditContext) (*domain.User, error) {
+	user, err := s.repo.GetByID(userID)
+	if err != nil {
+		return nil, err
+	}
+	if resultsEmail != nil {
+		user.NotifyResultsEmail = *resultsEmail
+	}
+	if resultsTelegram != nil {
+		user.NotifyResultsTelegram = *resultsTelegram
+	}
+	if err := s.repo.Update(user); err != nil {
+		return nil, err
+	}
+	s.audit.Log(&domain.AuditLog{
+		UserID:   userID,
+		Action:   "user.notification_preferences.updated",
+		Entity:   "user",
+		EntityID: userID.String(),
+		NewValue: fmt.Sprintf("results_email=%t results_telegram=%t", user.NotifyResultsEmail, user.NotifyResultsTelegram),
+	}, auditCtx)
+	return user, nil
+}
+
 func (s *UserService) Update(user *domain.User) error {
 	return s.repo.Update(user)
 }

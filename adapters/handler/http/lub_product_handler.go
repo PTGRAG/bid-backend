@@ -204,6 +204,9 @@ func (h *AuctionAdminHandler) List(c fiber.Ctx) error {
 	if err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to list auctions", err)
 	}
+	for i := range auctions {
+		h.svc.EnrichWinnerPaymentForStaff(&auctions[i])
+	}
 	return response.Success(c, fiber.StatusOK, "Auctions retrieved", fiber.Map{
 		"items": auctions,
 		"total": total,
@@ -221,7 +224,25 @@ func (h *AuctionAdminHandler) GetByID(c fiber.Ctx) error {
 	if err != nil {
 		return mapLUBError(c, err)
 	}
+	h.svc.EnrichWinnerPaymentForStaff(a)
 	return response.Success(c, fiber.StatusOK, "Auction found", a)
+}
+
+// ListWinnerOffers lists every "pay your bid" offer made for an auction, with the winner's
+// contact details so staff can call them.
+func (h *AuctionAdminHandler) ListWinnerOffers(c fiber.Ctx) error {
+	if !requireAdminRole(c) {
+		return nil
+	}
+	id, err := PathParamUUID(c, "id", "id")
+	if err != nil {
+		return err
+	}
+	offers, err := h.svc.ListWinnerOffers(id)
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to list winner offers", err)
+	}
+	return response.Success(c, fiber.StatusOK, "Winner offers retrieved", fiber.Map{"items": offers})
 }
 
 func (h *AuctionAdminHandler) Update(c fiber.Ctx) error {

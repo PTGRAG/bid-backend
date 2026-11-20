@@ -102,6 +102,54 @@ func (r *BidRepository) FindWinner(auctionID uuid.UUID) (*domain.Bid, error) {
 	return r.GetByID(row.ID)
 }
 
+// FindWinnerExcluding returns the lowest unique bid whose participant is not excluded. Uniqueness
+// is counted over every bid in the auction (the published draw results); excluded participants
+// are only skipped as winners, their bids still make other values non-unique.
+func (r *BidRepository) FindWinnerExcluding(auctionID uuid.UUID, excludeParticipantIDs []string) (*domain.Bid, error) {
+	if len(excludeParticipantIDs) == 0 {
+		return r.FindWinner(auctionID)
+	}
+	var row struct {
+		ID uuid.UUID
+	}
+	err := r.db.Raw(`
+		SELECT id
+		FROM auction_bids
+		WHERE auction_id = ?
+		  AND participant_id::text NOT IN ?
+		  AND bid_value IN (
+		    SELECT bid_value
+		    FROM auction_bids
+		    WHERE auction_id = ?
+		    GROUP BY bid_value
+		    HAVING COUNT(DISTINCT participant_id) = 1
+		  )
+		ORDER BY bid_value ASC, placed_at ASC
+		LIMIT 1
+	`, auctionID, excludeParticipantIDs, auctionID).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.ID == uuid.Nil {
+		return nil, nil
+	}
+	return r.GetByID(row.ID)
+}
+
+// MoveWinner moves the winner flag to another bid (the prize passed to the next lowest unique bid).
+func (r *BidRepository) MoveWinner(auctionID uuid.UUID, newWinnerBidID uuid.UUID) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&domain.Bid{}).
+			Where("auction_id = ? AND is_winner = ?", auctionID, true).
+			Update("is_winner", false).Error; err != nil {
+			return err
+		}
+		return tx.Model(&domain.Bid{}).
+			Where("id = ? AND auction_id = ?", newWinnerBidID, auctionID).
+			Update("is_winner", true).Error
+	})
+}
+
 // MarkWinner sets is_winner=true on the winning bid, and sets is_unique=true
 // on all bids whose bid_value was placed by exactly one participant.
 func (r *BidRepository) MarkWinner(auctionID uuid.UUID, winnerBidID uuid.UUID) error {

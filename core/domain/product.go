@@ -57,6 +57,10 @@ type Auction struct {
 	WinnerParticipantID *string    `gorm:"type:uuid;index:idx_auctions_winner_participant" json:"winnerParticipantId,omitempty"`
 	WinnerBidValue      *Money     `gorm:"type:decimal(10,2)"                              json:"winnerBidValue,omitempty"`
 	WinnerName          string     `gorm:"-"                                               json:"winnerName,omitempty"`
+	// Pay-only-if-you-win state (computed): see WinnerPaymentStatus* and MyAuctionResult.
+	WinnerPaymentStatus string           `gorm:"-" json:"winnerPaymentStatus,omitempty"`
+	WinnerPaymentDueAt  *time.Time       `gorm:"-" json:"winnerPaymentDueAt,omitempty"`
+	MyResult            *MyAuctionResult `gorm:"-" json:"myResult,omitempty"`
 	TotalBids           int64      `gorm:"-"                                               json:"totalBids"`
 	ParticipantCount    int64      `gorm:"-"                                               json:"participantCount"`
 	UserHasJoined       bool       `gorm:"-"                                               json:"userHasJoined"`
@@ -92,6 +96,7 @@ type PublicAuctionCard struct {
 	UserHasJoined    bool          `json:"userHasJoined"`
 	Tag              string        `json:"tag,omitempty"`
 	WinnerName       string        `json:"winnerName,omitempty"`
+	WinnerPaymentStatus string     `json:"winnerPaymentStatus,omitempty"`
 	PrizeUnlocked    bool          `json:"prizeUnlocked"`
 	FreeEntranceEnabled         bool `json:"freeEntranceEnabled"`
 	FreeEntranceLimit           int  `json:"freeEntranceLimit"`
@@ -117,6 +122,7 @@ type AuctionAudit struct {
 	Status              AuctionStatus       `json:"status"`
 	WinnerBidValue      *Money              `json:"winnerBidValue,omitempty"`
 	WinnerName          string              `json:"winnerName,omitempty"`
+	WinnerPaymentStatus string              `json:"winnerPaymentStatus,omitempty"`
 	TotalBids           int64               `json:"totalBids"`
 	UniqueBidsCount     int                 `json:"uniqueBidsCount"`
 	DuplicatedBidsCount int                 `json:"duplicatedBidsCount"`

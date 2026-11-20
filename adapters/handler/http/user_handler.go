@@ -105,6 +105,34 @@ func (h *UserHandler) UpdateMe(c fiber.Ctx) error {
 	})
 }
 
+type UpdateNotificationPreferencesRequest struct {
+	NotifyResultsEmail    *bool `json:"notifyResultsEmail"`
+	NotifyResultsTelegram *bool `json:"notifyResultsTelegram"`
+}
+
+// UpdateMyNotificationPreferences lets a participant opt in to email / Telegram messages about
+// auctions they did not win (the in-app notification is always sent).
+func (h *UserHandler) UpdateMyNotificationPreferences(c fiber.Ctx) error {
+	userIDStr, err := GetUserIDOrUnauthorized(c)
+	if err != nil {
+		return response.Error(c, fiber.StatusUnauthorized, "Unauthorized", err)
+	}
+	userID, _ := uuid.Parse(userIDStr)
+	var req UpdateNotificationPreferencesRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid request body", err)
+	}
+	auditCtx := domain.AuditContext(GetAuditContext(c))
+	user, err := h.service.UpdateNotificationPreferences(userID, req.NotifyResultsEmail, req.NotifyResultsTelegram, &auditCtx)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return response.Error(c, fiber.StatusNotFound, "User not found", nil)
+		}
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to update notification preferences", err)
+	}
+	return response.Success(c, fiber.StatusOK, "Notification preferences updated", fiber.Map{"user": user})
+}
+
 type ChangeMyPasswordRequest struct {
 	CurrentPassword string `json:"currentPassword" validate:"required"`
 	NewPassword     string `json:"newPassword"     validate:"required,min=4"`
