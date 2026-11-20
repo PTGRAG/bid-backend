@@ -78,22 +78,14 @@ func (h *UserHandler) UpdateMe(c fiber.Ctx) error {
 		return err
 	}
 
-	if strings.TrimSpace(req.FullName) != "" {
-		auditCtx := domain.AuditContext(GetAuditContext(c))
-		if err := h.service.UpdateProfile(c.Context(), userID, strings.TrimSpace(req.FullName), req.Phone, &auditCtx); err != nil {
-			if errors.Is(err, domain.ErrNotFound) {
-				return response.Error(c, fiber.StatusNotFound, "User not found", nil)
-			}
-			return response.Error(c, fiber.StatusInternalServerError, "Failed to update profile", err)
+	// Fields left out (or empty) keep their saved value; a phone number can be changed but not
+	// cleared here.
+	auditCtx := domain.AuditContext(GetAuditContext(c))
+	if err := h.service.UpdateProfile(c.Context(), userID, req.FullName, req.Phone, &auditCtx); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return response.Error(c, fiber.StatusNotFound, "User not found", nil)
 		}
-	} else {
-		user, _ := h.service.GetByID(userID)
-		if user != nil {
-			auditCtx := domain.AuditContext(GetAuditContext(c))
-			if err := h.service.UpdateProfile(c.Context(), userID, user.FullName, req.Phone, &auditCtx); err != nil {
-				return response.Error(c, fiber.StatusInternalServerError, "Failed to update profile", err)
-			}
-		}
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to update profile", err)
 	}
 
 	user, err := h.service.GetByID(userID)

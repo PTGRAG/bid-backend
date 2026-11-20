@@ -158,16 +158,20 @@ func (s *UserService) Delete(ctx context.Context, id uuid.UUID, auditCtx *domain
 }
 
 // UpdateProfile updates the current user's fullName and phone (own profile only).
+// UpdateProfile changes the user's name and/or phone. An empty value leaves that field as it is:
+// the phone is how staff reach a winner, so a partial update must never wipe it.
 func (s *UserService) UpdateProfile(ctx context.Context, userID uuid.UUID, fullName, phone string, auditCtx *domain.AuditContext) error {
 	_ = ctx // reserved for downstream ctx propagation
 	user, err := s.repo.GetByID(userID)
 	if err != nil {
 		return err
 	}
-	if fullName != "" {
-		user.FullName = strings.TrimSpace(fullName)
+	if name := strings.TrimSpace(fullName); name != "" {
+		user.FullName = name
 	}
-	user.Phone = strings.TrimSpace(phone)
+	if p := strings.TrimSpace(phone); p != "" {
+		user.Phone = p
+	}
 	if err := s.repo.Update(user); err != nil {
 		return err
 	}

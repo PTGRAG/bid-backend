@@ -216,6 +216,10 @@ func (h *AuctionAdminHandler) List(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) GetByID(c fiber.Ctx) error {
+	// Staff view: includes drafts and the unpaid winner's name, so participants must not see it.
+	if !requireAdminRole(c) {
+		return nil
+	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
 		return err
