@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bid-hub/admin-backend/core/domain"
+	"github.com/bid-hub/admin-backend/core/ports"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -55,4 +56,33 @@ func TestIsChapaUnknownTx(t *testing.T) {
 			t.Errorf("isChapaUnknownTx(%v)=%v want %v", c.err, got, c.want)
 		}
 	}
+}
+
+// ledgerStub returns a fixed payments row; other methods are not used by these tests.
+type ledgerStub struct {
+	ports.PaymentLedgerRepository
+	row *domain.Payment
+}
+
+func (l *ledgerStub) GetByTxRef(_ context.Context, _ string) (*domain.Payment, error) {
+	if l.row == nil {
+		return nil, domain.ErrNotFound
+	}
+	return l.row, nil
+}
+
+// The customer pays for the pack stored at checkout. Extra or different bid values coming
+// from anywhere else (for example a tampered verify request) must never be placed.
+func TestResolveBidValues_StoredPackWinsOverOtherSources(t *testing.T) {
+	svc := &Service{repo: &ledgerStub{row: &domain.Payment{TxRef: "R-paid1", BidValues: encodeBidValues([]domain.Money{domain.NewMoney(7)})}}}
+	svc.SetPendingBids("R-paid1", []domain.Money{domain.NewMoney(1), domain.NewMoney(2), domain.NewMoney(3)})
+	snap := &VerifiedSnapshot{
+		TxRef:     "R-paid1",
+		BidValues: []domain.Money{domain.NewMoney(1), domain.NewMoney(2), domain.NewMoney(3)},
+		Meta:      map[string]interface{}{"bid_values": "4_5_6"},
+	}
+
+	got := svc.resolveBidValues(context.Background(), "R-paid1", snap)
+	require.Len(t, got, 1)
+	assert.Equal(t, "7.00", got[0].String())
 }

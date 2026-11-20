@@ -46,7 +46,6 @@ func NewAuctionHandler(
 type RecordParticipationRequest struct {
 	AuctionID     string    `json:"auctionId"     validate:"omitempty,uuid"`
 	ProductID     string    `json:"productId"     validate:"omitempty,uuid"`
-	ParticipantID string    `json:"participantId"`
 	TransactionID string    `json:"transactionId"`
 	FeePaid       float64   `json:"feePaid"`
 	BidValue      float64   `json:"bidValue"`
@@ -89,13 +88,6 @@ func normalizeBidPack(req RecordParticipationRequest) ([]domain.Money, error) {
 		out = append(out, m)
 	}
 	return out, nil
-}
-
-type PlaceBidRequest struct {
-	AuctionID     string  `json:"auctionId"     validate:"omitempty,uuid"`
-	ProductID     string  `json:"productId"     validate:"omitempty,uuid"`
-	ParticipantID string  `json:"participantId"`
-	BidValue      float64 `json:"bidValue"      validate:"required,gt=0"`
 }
 
 type UpdateBidRequest struct {
@@ -253,10 +245,8 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 		return response.Error(c, fiber.StatusBadRequest, "valid auctionId is required", nil)
 	}
 
+	// The participant is always the signed-in account, never an ID sent by the browser.
 	participantID := strings.TrimSpace(GetUserID(c))
-	if participantID == "" {
-		participantID = strings.TrimSpace(req.ParticipantID)
-	}
 	userUUID, err := uuid.Parse(participantID)
 	if err != nil || userUUID == uuid.Nil {
 		return response.Error(c, fiber.StatusUnauthorized, "Authentication required", nil)
@@ -433,7 +423,7 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 			// The checkout never reached Chapa: give the reserved free slot back right away.
 			h.chapaPaymentSvc.AbortWaivedCheckout(c.Context(), txRef, "chapa initialize failed")
 		}
-		return response.Error(c, fiber.StatusBadGateway, "Could not initialize Chapa payment: "+err.Error(), err)
+		return response.Error(c, fiber.StatusBadGateway, "Could not start the payment. Please try again.", err)
 	}
 
 	return response.Success(c, fiber.StatusOK, "Chapa checkout initialized", fiber.Map{
@@ -453,11 +443,11 @@ func (h *AuctionHandler) VerifyChapaPayment(c fiber.Ctx) error {
 	if txRef == "" {
 		txRef = strings.TrimSpace(c.Query("trx_ref"))
 	}
+	// Bid values in the body or query are ignored: the bids placed are always the pack the
+	// customer was charged for, as stored on the payments row at checkout.
 	var body struct {
-		TxRef     string    `json:"txRef"`
-		TxRefAlt  string    `json:"tx_ref"`
-		BidValue  float64   `json:"bidValue"`
-		BidValues []float64 `json:"bidValues"`
+		TxRef    string `json:"txRef"`
+		TxRefAlt string `json:"tx_ref"`
 	}
 	_ = c.Bind().JSON(&body)
 	if txRef == "" {
@@ -470,34 +460,6 @@ func (h *AuctionHandler) VerifyChapaPayment(c fiber.Ctx) error {
 		return response.Error(c, fiber.StatusBadRequest, "txRef is required", nil)
 	}
 
-	bidVals := make([]domain.Money, 0)
-	for _, v := range body.BidValues {
-		if v > 0 {
-			bidVals = append(bidVals, domain.NewMoney(v))
-		}
-	}
-	if len(bidVals) == 0 && body.BidValue > 0 {
-		bidVals = append(bidVals, domain.NewMoney(body.BidValue))
-	}
-	if len(bidVals) == 0 {
-		if qVals := strings.TrimSpace(c.Query("bid_values")); qVals != "" {
-			for _, part := range strings.FieldsFunc(qVals, func(r rune) bool {
-				return r == ',' || r == '_' || r == ';' || r == '|'
-			}) {
-				if parsed, pErr := strconv.ParseFloat(strings.TrimSpace(part), 64); pErr == nil && parsed > 0 {
-					bidVals = append(bidVals, domain.NewMoney(parsed))
-				}
-			}
-		}
-	}
-	if len(bidVals) == 0 {
-		if qVal := strings.TrimSpace(c.Query("bid_value")); qVal != "" {
-			if parsed, pErr := strconv.ParseFloat(qVal, 64); pErr == nil && parsed > 0 {
-				bidVals = append(bidVals, domain.NewMoney(parsed))
-			}
-		}
-	}
-
 	if h.chapaClient == nil || h.chapaPaymentSvc == nil {
 		return response.Error(c, fiber.StatusServiceUnavailable, "Chapa payment gateway is not configured", nil)
 	}
@@ -508,13 +470,13 @@ func (h *AuctionHandler) VerifyChapaPayment(c fiber.Ctx) error {
 		if !existing.Processed {
 			_, _ = h.chapaPaymentSvc.RetryPaymentByTxRef(c.Context(), txRef)
 		}
-		h.chapaPaymentSvc.EnsureBidsForPayment(c.Context(), txRef, bidVals)
+		h.chapaPaymentSvc.EnsureBidsForPayment(c.Context(), txRef)
 		return h.paymentVerifyResponse(c, txRef, true, domain.PaymentStatusSuccess)
 	}
 
 	snap, err := h.chapaClient.VerifyTransaction(txRef)
 	if err != nil {
-		return response.Error(c, fiber.StatusBadGateway, "Failed to verify Chapa transaction: "+err.Error(), err)
+		return response.Error(c, fiber.StatusBadGateway, "Failed to verify Chapa transaction", err)
 	}
 
 	metaMap := chapapayment.NormalizeChapaMeta(snap.Meta)
@@ -527,10 +489,6 @@ func (h *AuctionHandler) VerifyChapaPayment(c fiber.Ctx) error {
 		Meta:           metaMap,
 		CustomerEmail:  snap.CustomerEmail,
 		CustomerFirst:  snap.CustomerFirst,
-		BidValues:      bidVals,
-	}
-	if len(bidVals) == 1 {
-		verifiedSnap.BidValue = bidVals[0]
 	}
 
 	if err := h.chapaPaymentSvc.ProcessVerified(c.Context(), verifiedSnap); err != nil {
@@ -555,7 +513,10 @@ func (h *AuctionHandler) paymentVerifyResponse(c fiber.Ctx, txRef string, verifi
 		"status":   status,
 		"txRef":    txRef,
 	}
-	if p, pErr := h.chapaPaymentSvc.GetPaymentByTxRef(c.Context(), txRef); pErr == nil && p != nil && p.AuctionID != nil && p.UserID != nil {
+	// Participation and bids are only returned to the account that made the payment.
+	viewerID := strings.TrimSpace(GetUserID(c))
+	if p, pErr := h.chapaPaymentSvc.GetPaymentByTxRef(c.Context(), txRef); pErr == nil && p != nil && p.AuctionID != nil && p.UserID != nil &&
+		viewerID != "" && strings.EqualFold(viewerID, p.UserID.String()) {
 		part, _ := h.svc.GetParticipation(*p.AuctionID, p.UserID.String())
 		bids, _ := h.svc.ListMyBids(*p.AuctionID, p.UserID.String())
 		out["auctionId"] = p.AuctionID.String()
@@ -653,56 +614,12 @@ func (h *AuctionHandler) ListMyParticipations(c fiber.Ctx) error {
 	})
 }
 
-func (h *AuctionHandler) PlaceBid(c fiber.Ctx) error {
-	var req PlaceBidRequest
-	if err := validate.BindAndValidate(c, &req); err != nil {
-		return err
-	}
-	rawID := strings.TrimSpace(req.AuctionID)
-	if rawID == "" {
-		rawID = strings.TrimSpace(req.ProductID)
-	}
-	auctionID, err := uuid.Parse(rawID)
-	if err != nil || auctionID == uuid.Nil {
-		return response.Error(c, fiber.StatusBadRequest, "valid auctionId is required", nil)
-	}
-
-	participantID := strings.TrimSpace(req.ParticipantID)
-	if participantID == "" {
-		participantID = strings.TrimSpace(GetUserID(c))
-	}
-	if participantID == "" {
-		return response.Error(c, fiber.StatusUnauthorized, "Authentication required", nil)
-	}
-
-	bid, err := h.svc.PlaceBid(
-		c.Context(),
-		auctionID,
-		participantID,
-		domain.NewMoney(req.BidValue),
-	)
-	if err != nil {
-		return mapLUBError(c, err)
-	}
-	return response.Success(c, fiber.StatusCreated, "Bid placed", bid)
-}
-
 func (h *AuctionHandler) UpdateBid(c fiber.Ctx) error {
 	bidID, err := PathParamUUID(c, "id", "id")
 	if err != nil {
 		return err
 	}
-	participantID := strings.TrimSpace(c.Query("participantId"))
-	if participantID == "" {
-		var body struct {
-			ParticipantID string `json:"participantId"`
-		}
-		_ = c.Bind().JSON(&body)
-		participantID = strings.TrimSpace(body.ParticipantID)
-	}
-	if participantID == "" {
-		participantID = strings.TrimSpace(GetUserID(c))
-	}
+	participantID := strings.TrimSpace(GetUserID(c))
 	if participantID == "" {
 		return response.Error(c, fiber.StatusUnauthorized, "Authentication required", nil)
 	}
@@ -728,10 +645,7 @@ func (h *AuctionHandler) GetMyBids(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	participantID := strings.TrimSpace(c.Query("participantId"))
-	if participantID == "" {
-		participantID = strings.TrimSpace(GetUserID(c))
-	}
+	participantID := strings.TrimSpace(GetUserID(c))
 	if participantID == "" {
 		return response.Success(c, fiber.StatusOK, "Bids retrieved", []domain.Bid{})
 	}
@@ -751,10 +665,7 @@ func (h *AuctionHandler) GetMyParticipation(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	participantID := strings.TrimSpace(c.Query("participantId"))
-	if participantID == "" {
-		participantID = strings.TrimSpace(GetUserID(c))
-	}
+	participantID := strings.TrimSpace(GetUserID(c))
 	if participantID == "" {
 		return response.Success(c, fiber.StatusOK, "Not participating", fiber.Map{"participating": false})
 	}

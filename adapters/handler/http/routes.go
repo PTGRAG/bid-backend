@@ -233,7 +233,8 @@ func registerPublicAuctionRoutes(api fiber.Router, optionalAuth fiber.Handler, p
 	api.Get("/public/auctions/:id", optionalAuth, publicHandler.GetPublicAuction)
 	api.Get("/public/auctions/:id/audit", publicHandler.GetAuctionAudit)
 	api.Post("/public/auctions/:auctionId/participate", optionalAuth, publicHandler.RecordParticipation)
-	api.Post("/public/bids", optionalAuth, publicHandler.PlaceBid)
+	// Bids are only created by a paid checkout (each ticket is paid for), so there is no public
+	// "place bid" route. Bid reads and edits act on the signed-in account only.
 	api.Patch("/public/bids/:id", optionalAuth, publicHandler.UpdateBid)
 	api.Get("/public/auctions/:auctionId/my-bids", optionalAuth, publicHandler.GetMyBids)
 	api.Get("/public/auctions/:auctionId/my-participation", optionalAuth, publicHandler.GetMyParticipation)

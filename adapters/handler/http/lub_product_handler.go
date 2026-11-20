@@ -120,8 +120,8 @@ type PostponeAuctionRequest struct {
 }
 
 func (h *AuctionAdminHandler) Create(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	actorIDStr, err := GetUserIDOrUnauthorized(c)
 	if err != nil {
@@ -190,8 +190,8 @@ func (h *AuctionAdminHandler) Create(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) List(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	page, limit, _, err := validate.BindPagination(c, 1, 20, 100)
 	if err != nil {
@@ -225,8 +225,8 @@ func (h *AuctionAdminHandler) GetByID(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) Update(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -293,8 +293,8 @@ func (h *AuctionAdminHandler) Update(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) Activate(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -310,8 +310,8 @@ func (h *AuctionAdminHandler) Activate(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) Postpone(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -335,8 +335,8 @@ func (h *AuctionAdminHandler) Postpone(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) Close(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -352,8 +352,8 @@ func (h *AuctionAdminHandler) Close(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) Cancel(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -369,8 +369,8 @@ func (h *AuctionAdminHandler) Cancel(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) ExecuteDraw(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -390,8 +390,8 @@ func (h *AuctionAdminHandler) ExecuteDraw(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) ListParticipants(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -414,8 +414,8 @@ func (h *AuctionAdminHandler) ListParticipants(c fiber.Ctx) error {
 }
 
 func (h *AuctionAdminHandler) ListBids(c fiber.Ctx) error {
-	if err := requireAdminRole(c); err != nil {
-		return err
+	if !requireAdminRole(c) {
+		return nil
 	}
 	id, err := PathParamUUID(c, "id", "id")
 	if err != nil {
@@ -437,12 +437,16 @@ func (h *AuctionAdminHandler) ListBids(c fiber.Ctx) error {
 	})
 }
 
-func requireAdminRole(c fiber.Ctx) error {
+// requireAdminRole writes a 403 and returns false when the caller is not an admin. Callers
+// must stop when it returns false. (Writing the 403 alone does not stop a Fiber handler: the
+// JSON write returns nil, so an error-returning guard let every signed-in user through.)
+func requireAdminRole(c fiber.Ctx) bool {
 	role := GetUserRole(c)
 	if role != domain.RoleAdmin && role != domain.RoleSuperAdmin {
-		return response.Error(c, fiber.StatusForbidden, "Admin access required", nil)
+		_ = response.Error(c, fiber.StatusForbidden, "Admin access required", nil)
+		return false
 	}
-	return nil
+	return true
 }
 
 func mapLUBError(c fiber.Ctx, err error) error {

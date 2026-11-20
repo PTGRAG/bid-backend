@@ -44,17 +44,20 @@ type broadcastRequest struct {
 	ButtonURL  string `json:"buttonUrl"`
 }
 
-func (h *TelegramBroadcastHandler) requireStaffMutator(c fiber.Ctx) error {
+// requireStaffMutator writes a 403 and returns false when the caller is not an admin.
+// Callers must stop when it returns false.
+func (h *TelegramBroadcastHandler) requireStaffMutator(c fiber.Ctx) bool {
 	role := GetUserRole(c)
 	if role != domain.RoleSuperAdmin && role != domain.RoleAdmin {
-		return response.Error(c, fiber.StatusForbidden, "Forbidden: Admin access required", nil)
+		_ = response.Error(c, fiber.StatusForbidden, "Forbidden: Admin access required", nil)
+		return false
 	}
-	return nil
+	return true
 }
 
 func (h *TelegramBroadcastHandler) Stats(c fiber.Ctx) error {
-	if err := h.requireStaffMutator(c); err != nil {
-		return err
+	if !h.requireStaffMutator(c) {
+		return nil
 	}
 	userIDs, err := h.users.ListTelegramIDs()
 	if err != nil {
@@ -68,8 +71,8 @@ func (h *TelegramBroadcastHandler) Stats(c fiber.Ctx) error {
 }
 
 func (h *TelegramBroadcastHandler) Broadcast(c fiber.Ctx) error {
-	if err := h.requireStaffMutator(c); err != nil {
-		return err
+	if !h.requireStaffMutator(c) {
+		return nil
 	}
 	if h.poster == nil || !h.poster.BroadcastConfigured() {
 		return response.Error(c, fiber.StatusServiceUnavailable, "Telegram bot is not configured", nil)

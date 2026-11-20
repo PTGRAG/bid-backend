@@ -183,7 +183,18 @@ func parseMoneyFromMeta(raw interface{}) (domain.Money, bool) {
 	return domain.Zero(), false
 }
 
+// resolveBidValues returns the bids a payment paid for. The bid pack saved on the payments
+// row at checkout is authoritative: the customer was charged for exactly those bids. The other
+// sources are server-set too (Chapa meta and the in-memory pack are written at checkout) and
+// only serve rows created before the pack was stored. Values sent by the browser are never used.
 func (s *Service) resolveBidValues(ctx context.Context, txRef string, snap *VerifiedSnapshot) []domain.Money {
+	if s.repo != nil {
+		if p, err := s.repo.GetByTxRef(ctx, txRef); err == nil && p != nil {
+			if out := decodeBidValues(p.BidValues); len(out) > 0 {
+				return out
+			}
+		}
+	}
 	if snap != nil && len(snap.BidValues) > 0 {
 		out := make([]domain.Money, 0, len(snap.BidValues))
 		for _, v := range snap.BidValues {
@@ -247,12 +258,6 @@ func (s *Service) resolveBidValues(ctx context.Context, txRef string, snap *Veri
 			if vals.IsPositive() {
 				return []domain.Money{vals}
 			}
-		}
-	}
-	// Durable fallback: bid pack saved on the payments row at checkout.
-	if p, err := s.repo.GetByTxRef(ctx, txRef); err == nil && p != nil {
-		if out := decodeBidValues(p.BidValues); len(out) > 0 {
-			return out
 		}
 	}
 	return nil
@@ -571,19 +576,17 @@ func (s *Service) GetPaymentByTxRef(ctx context.Context, txRef string) (*domain.
 
 // EnsureBidsForPayment places any missing bid pack for an already-successful payment
 // (e.g. return-URL verify after webhook fulfilled participation without in-memory bids).
-func (s *Service) EnsureBidsForPayment(ctx context.Context, txRef string, bidValues []domain.Money) {
+// The bids come only from the server's own record of the checkout.
+func (s *Service) EnsureBidsForPayment(ctx context.Context, txRef string) {
 	txRef = strings.TrimSpace(txRef)
 	if txRef == "" {
 		return
-	}
-	if len(bidValues) > 0 {
-		s.SetPendingBids(txRef, bidValues)
 	}
 	p, err := s.repo.GetByTxRef(ctx, txRef)
 	if err != nil || p == nil || p.UserID == nil || p.AuctionID == nil {
 		return
 	}
-	snap := &VerifiedSnapshot{TxRef: txRef, BidValues: bidValues}
+	snap := &VerifiedSnapshot{TxRef: txRef}
 	s.placePendingBidsIfNeeded(ctx, txRef, *p.AuctionID, p.UserID.String(), snap)
 }
 
