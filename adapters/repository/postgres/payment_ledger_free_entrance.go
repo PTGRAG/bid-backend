@@ -52,8 +52,10 @@ func (r *PaymentLedgerRepo) CreateWaivedPending(ctx context.Context, p *domain.P
 	if p == nil || p.UserID == nil || p.AuctionID == nil || strings.TrimSpace(p.TxRef) == "" {
 		return fmt.Errorf("waived payment needs tx_ref, user and auction: %w", domain.ErrInvalidInput)
 	}
-	if !p.Amount.IsPositive() {
-		return fmt.Errorf("waived payment amount must be positive: %w", domain.ErrInvalidInput)
+	// A single free ticket costs nothing (tickets are entrance fees only; the bid is paid only
+	// by the winner), so the amount may be 0. It can never be negative.
+	if p.Amount.IsNegative() {
+		return fmt.Errorf("waived payment amount cannot be negative: %w", domain.ErrInvalidInput)
 	}
 	p.EntranceWaived = true
 	p.Status = domain.PaymentStatusPending

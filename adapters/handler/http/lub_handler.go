@@ -153,6 +153,7 @@ func (h *AuctionHandler) GetPublicAuction(c fiber.Ctx) error {
 		}
 	}
 	h.svc.EnrichAuctionFreeEntrance(a, viewerID)
+	h.svc.EnrichWinnerPayment(a, viewerID)
 	return response.Success(c, fiber.StatusOK, "Auction found", a)
 }
 
@@ -314,6 +315,17 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to create pending payment", err)
 	}
 
+	if waive && chargeAmount.IsZero() {
+		// One free ticket: nothing to charge, so the ticket is issued without Chapa.
+		if err := h.chapaPaymentSvc.FulfillFreeCheckout(c.Context(), txRef); err != nil {
+			if !errors.Is(err, chapapayment.ErrFulfillmentDeferred) {
+				h.chapaPaymentSvc.AbortWaivedCheckout(c.Context(), txRef, "free ticket fulfillment failed")
+				return mapLUBError(c, err)
+			}
+		}
+		return h.paymentVerifyResponse(c, txRef, true, domain.PaymentStatusSuccess)
+	}
+
 	email := "bidder@carramarket.com"
 	firstName := "CarraMarket"
 	lastName := "Bidder"
@@ -391,16 +403,16 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 		meta["bid_values"] = strings.Join(bidValueStrings, "_")
 	}
 
-	desc := "Auction entrance fee and bid"
+	// Tickets are entrance fees only: the bid amount is paid by the winner after the draw.
+	desc := "Auction ticket"
 	if waive {
 		// Informational only; the waiver is read from the ledger row, never from this meta.
 		meta["entrance_waived"] = "true"
-		desc = "Auction entrance fee and bid (first entrance fee free)"
 	}
 	if len(bidPack) > 1 {
-		desc = fmt.Sprintf("Auction bid pack %d tickets", len(bidPack))
+		desc = fmt.Sprintf("Auction tickets x%d", len(bidPack))
 		if waive {
-			desc = fmt.Sprintf("Auction bid pack %d tickets (first entrance fee free)", len(bidPack))
+			desc = fmt.Sprintf("Auction tickets x%d (first free)", len(bidPack))
 		}
 	}
 
@@ -523,6 +535,13 @@ func (h *AuctionHandler) paymentVerifyResponse(c fiber.Ctx, txRef string, verifi
 		out["participating"] = part != nil && part.Status == domain.ParticipationStatusActive
 		out["participation"] = part
 		out["bids"] = bids
+		out["purpose"] = p.Purpose
+		if p.Purpose == domain.PaymentPurposeWinner {
+			if a, aErr := h.svc.GetAuctionByID(*p.AuctionID); aErr == nil && a != nil {
+				h.svc.EnrichWinnerPayment(a, viewerID)
+				out["myResult"] = a.MyResult
+			}
+		}
 	}
 	return response.Success(c, fiber.StatusOK, "Payment verification complete", out)
 }
@@ -599,6 +618,7 @@ func (h *AuctionHandler) ListMyParticipations(c fiber.Ctx) error {
 			auction.WinnerParticipantID = nil
 			auction.WinnerBidValue = nil
 		}
+		h.svc.EnrichWinnerPayment(auction, userID)
 		bids, _ := h.svc.ListMyBids(part.AuctionID, userID)
 		items = append(items, fiber.Map{
 			"auction":       auction,
@@ -680,4 +700,126 @@ func (h *AuctionHandler) GetMyParticipation(c fiber.Ctx) error {
 		"participating": true,
 		"participation": part,
 	})
+}
+
+type PayWinningBidRequest struct {
+	ReturnURL string `json:"returnUrl"`
+}
+
+// PayWinningBid starts the Chapa checkout for the signed-in winner's bid amount.
+func (h *AuctionHandler) PayWinningBid(c fiber.Ctx) error {
+	auctionID, err := PathParamUUID(c, "auctionId", "auctionId")
+	if err != nil {
+		return err
+	}
+	participantID := strings.TrimSpace(GetUserID(c))
+	userUUID, err := uuid.Parse(participantID)
+	if err != nil || userUUID == uuid.Nil {
+		return response.Error(c, fiber.StatusUnauthorized, "Authentication required", nil)
+	}
+	if h.chapaClient == nil || h.chapaPaymentSvc == nil {
+		return response.Error(c, fiber.StatusServiceUnavailable, "Chapa payment gateway is not configured", nil)
+	}
+	var req PayWinningBidRequest
+	_ = c.Bind().JSON(&req)
+
+	// The amount is the bid on the open offer; the browser never chooses it.
+	offer, err := h.svc.RequirePayableOffer(auctionID, participantID)
+	if err != nil {
+		return mapLUBError(c, err)
+	}
+	a, err := h.svc.GetAuctionByID(auctionID)
+	if err != nil {
+		return mapLUBError(c, err)
+	}
+
+	txRef := "W-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:20]
+	if err := h.chapaPaymentSvc.CreateWinnerPendingPayment(c.Context(), txRef, offer); err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to create pending payment", err)
+	}
+
+	email, firstName, lastName, phone := h.chapaCustomer(userUUID)
+
+	cfgCallback := ""
+	if h.cfg != nil {
+		cfgCallback = h.cfg.CallbackURL
+	}
+	scheme := c.Protocol()
+	if proto := strings.TrimSpace(c.Get("X-Forwarded-Proto")); proto != "" {
+		scheme = strings.TrimSpace(strings.Split(proto, ",")[0])
+	}
+	callbackURL := resolveChapaCallbackURL(cfgCallback, scheme, c.Host())
+
+	returnBase := strings.TrimSpace(req.ReturnURL)
+	if returnBase == "" {
+		origin := strings.TrimSpace(c.Get("Origin"))
+		if origin == "" && h.cfg != nil {
+			origin = strings.TrimSpace(h.cfg.ParticipantAppURL)
+		}
+		if origin == "" {
+			origin = "https://carramarket.com"
+		}
+		returnBase = fmt.Sprintf("%s/auctions/%s", strings.TrimRight(origin, "/"), auctionID.String())
+	}
+	if parsed, uErr := url.Parse(returnBase); uErr == nil {
+		q := parsed.Query()
+		q.Set("tx_ref", txRef)
+		q.Set("winner_payment", "1")
+		parsed.RawQuery = q.Encode()
+		returnBase = parsed.String()
+	}
+
+	initResp, err := h.chapaClient.InitializeTransaction(ports.ChapaInitializeRequest{
+		Amount:      offer.BidValue.String(),
+		Currency:    "ETB",
+		Email:       email,
+		FirstName:   firstName,
+		LastName:    lastName,
+		PhoneNumber: phone,
+		TxRef:       txRef,
+		CallbackURL: callbackURL,
+		ReturnURL:   returnBase,
+		Title:       "CarraMarket",
+		Description: "Winning bid payment",
+		Meta: map[string]interface{}{
+			"auction_id": auctionID.String(),
+			"user_id":    userUUID.String(),
+			"purpose":    domain.PaymentPurposeWinner,
+			"offer_id":   offer.ID.String(),
+		},
+	})
+	if err != nil {
+		return response.Error(c, fiber.StatusBadGateway, "Could not start the payment. Please try again.", err)
+	}
+	return response.Success(c, fiber.StatusOK, "Chapa checkout initialized", fiber.Map{
+		"checkoutUrl": initResp.CheckoutURL,
+		"txRef":       initResp.TxRef,
+		"amount":      offer.BidValue,
+		"dueAt":       offer.DueAt,
+		"auction":     a.Title,
+	})
+}
+
+// chapaCustomer fills Chapa's customer fields from the account (placeholders when missing).
+func (h *AuctionHandler) chapaCustomer(userID uuid.UUID) (email, firstName, lastName, phone string) {
+	email, firstName, lastName = "bidder@carramarket.com", "CarraMarket", "Bidder"
+	if h.userRepo == nil {
+		return
+	}
+	u, err := h.userRepo.GetByID(userID)
+	if err != nil || u == nil {
+		return
+	}
+	if strings.Contains(u.Email, "@") {
+		email = strings.TrimSpace(u.Email)
+	}
+	parts := strings.Fields(strings.TrimSpace(u.FullName))
+	if len(parts) > 0 {
+		firstName = parts[0]
+		if len(parts) > 1 {
+			lastName = strings.Join(parts[1:], " ")
+		}
+	}
+	phone = formatChapaPhone(u.Phone)
+	return
 }

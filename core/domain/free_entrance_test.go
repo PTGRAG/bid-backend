@@ -133,11 +133,13 @@ func TestCheckoutCharge(t *testing.T) {
 		waive bool
 		want  string
 	}{
-		{"no promo single", []Money{m("1")}, false, "61.00"},
-		{"no promo pack", []Money{m("10.4"), m("11.11")}, false, "141.51"},
-		{"promo single is bid only", []Money{m("1")}, true, "1.00"},
-		{"promo pack pays fee from 2nd bid", []Money{m("10.4"), m("11.11")}, true, "81.51"},
-		{"promo three bids [0,1,2]", []Money{m("1"), m("2"), m("3")}, true, "126.00"},
+		// Pay only if you win: a ticket costs the entrance fee only, whatever the bid value.
+		{"no promo single", []Money{m("1")}, false, "60.00"},
+		{"no promo pack", []Money{m("10.4"), m("11.11")}, false, "120.00"},
+		{"bid value never charged", []Money{m("99999.99")}, false, "60.00"},
+		{"promo single ticket is free", []Money{m("1")}, true, "0.00"},
+		{"promo pack pays fee from 2nd ticket", []Money{m("10.4"), m("11.11")}, true, "60.00"},
+		{"promo three tickets [0,1,2]", []Money{m("1"), m("2"), m("3")}, true, "120.00"},
 		{"empty pack", nil, true, "0.00"},
 	}
 	for _, c := range cases {

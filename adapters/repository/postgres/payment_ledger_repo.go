@@ -21,11 +21,11 @@ func NewPaymentLedgerRepository(db *gorm.DB) *PaymentLedgerRepo {
 }
 
 const safePaymentSelect = `id, tx_ref, chapa_reference, user_id, auction_id, participation_id,
-	amount, bid_values, entrance_waived, status, processed, retry_disabled, last_error, created_at, updated_at`
+	amount, bid_values, entrance_waived, purpose, winner_offer_id, status, processed, retry_disabled, last_error, created_at, updated_at`
 
 // Qualified for JOINs (participant_users / auctions also have id, status, created_at, …).
 const safePaymentSelectQualified = `payments.id, payments.tx_ref, payments.chapa_reference, payments.user_id, payments.auction_id, payments.participation_id,
-	payments.amount, payments.bid_values, payments.entrance_waived, payments.status, payments.processed, payments.retry_disabled, payments.last_error, payments.created_at, payments.updated_at`
+	payments.amount, payments.bid_values, payments.entrance_waived, payments.purpose, payments.winner_offer_id, payments.status, payments.processed, payments.retry_disabled, payments.last_error, payments.created_at, payments.updated_at`
 
 const paymentStaffEnrichSelect = safePaymentSelectQualified + `,
 	participant_users.full_name AS participant_name,
@@ -98,6 +98,16 @@ func (r *PaymentLedgerRepo) Upsert(ctx context.Context, p *domain.Payment) error
 		"updated_at":       time.Now(),
 	}
 	return db.Model(&domain.Payment{}).Where("tx_ref = ?", p.TxRef).Updates(updates).Error
+}
+
+// HasPendingForOffer reports whether a winner payment for offerID started after `since` is
+// still pending (the customer may be finishing it at Chapa).
+func (r *PaymentLedgerRepo) HasPendingForOffer(ctx context.Context, offerID uuid.UUID, since time.Time) (bool, error) {
+	var n int64
+	err := r.db.WithContext(ctx).Model(&domain.Payment{}).
+		Where("winner_offer_id = ? AND status = ? AND created_at >= ?", offerID, domain.PaymentStatusPending, since).
+		Count(&n).Error
+	return n > 0, err
 }
 
 func (r *PaymentLedgerRepo) GetByTxRef(ctx context.Context, txRef string) (*domain.Payment, error) {

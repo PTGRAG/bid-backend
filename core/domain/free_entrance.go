@@ -8,9 +8,9 @@ import (
 // Free-entrance promo
 //
 // When enabled on an auction, the first N joiners (N = FreeEntranceLimit, or everyone when
-// the limit is FreeEntranceUnlimited) skip the entrance fee on their FIRST bid (index 0 of the
-// pack). Every further bid in the pack still pays its entrance fee, and all bid amounts are paid
-// through Chapa. Each customer may use the promo on one auction only, ever.
+// the limit is FreeEntranceUnlimited) skip the entrance fee on their FIRST ticket (index 0 of
+// the pack), so that ticket costs nothing. Every further ticket in the pack still pays its
+// entrance fee. Each customer may use the promo on one auction only, ever.
 const (
 	// FreeEntranceUnlimited is the stored limit meaning "all" (no cap on free joiners).
 	FreeEntranceUnlimited = 0
@@ -20,14 +20,16 @@ const (
 	MaxFreeEntranceLimit = 1_000_000
 )
 
-// CheckoutCharge is the single source of truth for what a join checkout costs. Each bid pays
-// its bid amount plus the entrance fee; when waiveFirst is set the entrance fee of the first
-// bid (index 0) is waived, so the total is sum(bids) + fee*(len(bids)-1). The server computes
-// this; the client's quote is only ever compared via the expectEntranceFree flag.
+// CheckoutCharge is the single source of truth for what a join checkout costs.
+//
+// Pay-only-if-you-win: a ticket costs only the entrance fee. The bid amount is never charged
+// at checkout; only the winner pays it, after the draw (see WinnerOffer). When waiveFirst is
+// set the entrance fee of the first ticket (index 0) is waived, so the total is
+// fee*(len(bids)-1) and a single free ticket costs 0. The server computes this; the client's
+// quote is only ever compared via the expectEntranceFree flag.
 func CheckoutCharge(bids []Money, entranceFee Money, waiveFirst bool) Money {
 	total := Zero()
-	for i, b := range bids {
-		total = total.Add(b)
+	for i := range bids {
 		if waiveFirst && i == 0 {
 			continue
 		}

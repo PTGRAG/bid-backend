@@ -78,22 +78,14 @@ func (h *UserHandler) UpdateMe(c fiber.Ctx) error {
 		return err
 	}
 
-	if strings.TrimSpace(req.FullName) != "" {
-		auditCtx := domain.AuditContext(GetAuditContext(c))
-		if err := h.service.UpdateProfile(c.Context(), userID, strings.TrimSpace(req.FullName), req.Phone, &auditCtx); err != nil {
-			if errors.Is(err, domain.ErrNotFound) {
-				return response.Error(c, fiber.StatusNotFound, "User not found", nil)
-			}
-			return response.Error(c, fiber.StatusInternalServerError, "Failed to update profile", err)
+	// Fields left out (or empty) keep their saved value; a phone number can be changed but not
+	// cleared here.
+	auditCtx := domain.AuditContext(GetAuditContext(c))
+	if err := h.service.UpdateProfile(c.Context(), userID, req.FullName, req.Phone, &auditCtx); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return response.Error(c, fiber.StatusNotFound, "User not found", nil)
 		}
-	} else {
-		user, _ := h.service.GetByID(userID)
-		if user != nil {
-			auditCtx := domain.AuditContext(GetAuditContext(c))
-			if err := h.service.UpdateProfile(c.Context(), userID, user.FullName, req.Phone, &auditCtx); err != nil {
-				return response.Error(c, fiber.StatusInternalServerError, "Failed to update profile", err)
-			}
-		}
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to update profile", err)
 	}
 
 	user, err := h.service.GetByID(userID)
@@ -103,6 +95,34 @@ func (h *UserHandler) UpdateMe(c fiber.Ctx) error {
 	return response.Success(c, fiber.StatusOK, "Profile updated successfully", fiber.Map{
 		"user": user,
 	})
+}
+
+type UpdateNotificationPreferencesRequest struct {
+	NotifyResultsEmail    *bool `json:"notifyResultsEmail"`
+	NotifyResultsTelegram *bool `json:"notifyResultsTelegram"`
+}
+
+// UpdateMyNotificationPreferences lets a participant opt in to email / Telegram messages about
+// auctions they did not win (the in-app notification is always sent).
+func (h *UserHandler) UpdateMyNotificationPreferences(c fiber.Ctx) error {
+	userIDStr, err := GetUserIDOrUnauthorized(c)
+	if err != nil {
+		return response.Error(c, fiber.StatusUnauthorized, "Unauthorized", err)
+	}
+	userID, _ := uuid.Parse(userIDStr)
+	var req UpdateNotificationPreferencesRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid request body", err)
+	}
+	auditCtx := domain.AuditContext(GetAuditContext(c))
+	user, err := h.service.UpdateNotificationPreferences(userID, req.NotifyResultsEmail, req.NotifyResultsTelegram, &auditCtx)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return response.Error(c, fiber.StatusNotFound, "User not found", nil)
+		}
+		return response.Error(c, fiber.StatusInternalServerError, "Failed to update notification preferences", err)
+	}
+	return response.Success(c, fiber.StatusOK, "Notification preferences updated", fiber.Map{"user": user})
 }
 
 type ChangeMyPasswordRequest struct {

@@ -88,11 +88,17 @@ func RegisterRoutes(app *fiber.App, db *gorm.DB, redisClient *goredis.Client, cf
 	notificationService := notifications.NewService(notificationRepo, userRepo, participantUserRepo, participationRepo, cacheRepo, emailService, smsService)
 	telegramPoster := telegramadapter.NewChannelPoster(cfg, slog.Default())
 	notificationService.SetTelegramMessenger(telegramPoster)
+	notificationService.SetAppURL(cfg.ParticipantAppURL)
 	auctionService := lub.NewService(auctionRepo, participationRepo, bidRepo, auditService, notificationService, telegramPoster)
 	chapaPaymentSvc := chapapayment.NewService(paymentLedgerRepo, auctionService, participantUserRepo, notificationService, slog.Default())
 	chapaPaymentSvc.SetChapaClient(chapaClient)
 	chapaPaymentSvc.SetMetrics(metricsProvider)
 	chapaPaymentSvc.SetAdminNotifier(telegramPoster)
+	// Pay only if you win: winner offers, staff alerts, and the pending-payment check.
+	auctionService.SetWinnerOffers(postgres.NewWinnerOfferRepository(db))
+	auctionService.SetAdminNotifier(telegramPoster)
+	auctionService.SetWinnerPaymentChecker(chapaPaymentSvc)
+	auctionService.SetContactLookup(notificationService)
 	auctionAdminHandler := NewAuctionAdminHandler(auctionService)
 	auctionHandler := NewAuctionHandler(auctionService, chapaPaymentSvc, chapaClient, userRepo, cfg)
 
@@ -184,6 +190,7 @@ func registerUserRoutes(protected fiber.Router, userHandler *UserHandler, partic
 	protected.Get("/me", userHandler.GetMe)
 	protected.Patch("/me", userHandler.UpdateMe)
 	protected.Patch("/me/password", userHandler.ChangeMyPassword)
+	protected.Patch("/me/notification-preferences", userHandler.UpdateMyNotificationPreferences)
 	protected.Get("/me/participations", auctionHandler.ListMyParticipations)
 
 	protected.Get("/users", userHandler.List)
@@ -238,6 +245,8 @@ func registerPublicAuctionRoutes(api fiber.Router, optionalAuth fiber.Handler, p
 	api.Patch("/public/bids/:id", optionalAuth, publicHandler.UpdateBid)
 	api.Get("/public/auctions/:auctionId/my-bids", optionalAuth, publicHandler.GetMyBids)
 	api.Get("/public/auctions/:auctionId/my-participation", optionalAuth, publicHandler.GetMyParticipation)
+	// Pay only if you win: the winner pays their bid amount after the draw.
+	api.Post("/public/auctions/:auctionId/winner-payment", optionalAuth, publicHandler.PayWinningBid)
 	api.Post("/public/payments/verify", optionalAuth, publicHandler.VerifyChapaPayment)
 	api.Get("/public/payments/verify/:txRef", optionalAuth, publicHandler.VerifyChapaPayment)
 	api.Post("/webhooks/chapa", publicHandler.ChapaWebhook)
@@ -257,4 +266,5 @@ func registerAdminAuctionRoutes(protected fiber.Router, adminHandler *AuctionAdm
 	auctions.Post("/:id/execute-draw", adminHandler.ExecuteDraw)
 	auctions.Get("/:id/participants", adminHandler.ListParticipants)
 	auctions.Get("/:id/bids", adminHandler.ListBids)
+	auctions.Get("/:id/winner-offers", adminHandler.ListWinnerOffers)
 }

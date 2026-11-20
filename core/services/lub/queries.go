@@ -94,9 +94,23 @@ func (s *Service) toPublicAuctionCards(auctions []domain.Auction, viewerID strin
 		a.UserEligibleForFreeEntrance = a.FreeEntranceAvailable() && viewerID != "" && !viewerUsedFree && !a.UserHasJoined
 	}
 
+	winnerStatus := s.winnerPaymentStatuses(auctions)
+
 	cards := make([]domain.PublicAuctionCard, 0, len(auctions))
 	for i := range auctions {
-		cards = append(cards, toPublicAuctionCard(auctions[i], growthMap[auctions[i].ID], maxGrowth, now))
+		card := toPublicAuctionCard(auctions[i], growthMap[auctions[i].ID], maxGrowth, now)
+		if s.winnerOffers != nil {
+			st, ok := winnerStatus[auctions[i].ID]
+			if !ok {
+				st = winnerStatusFromOffer(&auctions[i], nil)
+			}
+			card.WinnerPaymentStatus = st
+			// The winner is named only once they have paid.
+			if st != domain.WinnerPaymentStatusPaid {
+				card.WinnerName = ""
+			}
+		}
+		cards = append(cards, card)
 	}
 	return cards
 }
@@ -226,7 +240,9 @@ func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, er
 		return nil, domain.NewAppError(404, "Auction not found", nil)
 	}
 
-	if a.Status != domain.AuctionStatusExecuted && a.Status != domain.AuctionStatusClosed {
+	// A cancelled auction that was drawn (no winner paid in time) keeps its published results.
+	drawnThenCancelled := a.Status == domain.AuctionStatusCancelled && a.WinnerBidID != nil
+	if a.Status != domain.AuctionStatusExecuted && a.Status != domain.AuctionStatusClosed && !drawnThenCancelled {
 		return nil, domain.NewAppError(403, "Audit log is published only after the auction round has completed", nil)
 	}
 
@@ -284,12 +300,16 @@ func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, er
 		}
 	}
 
+	// The winner is named only once they have paid (pay only if you win).
+	s.EnrichWinnerPayment(a, "")
+
 	audit := &domain.AuctionAudit{
 		AuctionID:           a.ID,
 		Title:               a.Title,
 		Status:              a.Status,
 		WinnerBidValue:      a.WinnerBidValue,
 		WinnerName:          a.WinnerName,
+		WinnerPaymentStatus: a.WinnerPaymentStatus,
 		TotalBids:           total,
 		UniqueBidsCount:     uniqueCount,
 		DuplicatedBidsCount: duplicateCount,
