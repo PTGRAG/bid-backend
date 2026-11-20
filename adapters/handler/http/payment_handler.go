@@ -75,6 +75,7 @@ func (h *PaymentHandler) List(c fiber.Ctx) error {
 			"auctionTitle":     p.AuctionTitle,
 			"hasParticipation": p.HasParticipation,
 			"refundStatus":     p.RefundStatus,
+			"purpose":          p.Purpose,
 			"canRefund":        paymentledger.RefundEligible(p),
 		}
 		if p.UserID != nil {
