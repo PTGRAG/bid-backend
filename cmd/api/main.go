@@ -13,10 +13,13 @@ import (
 
 	handler "github.com/bid-hub/admin-backend/adapters/handler/http"
 	"github.com/bid-hub/admin-backend/adapters/handler/response"
+	"github.com/bid-hub/admin-backend/adapters/notification/sms"
 	"github.com/bid-hub/admin-backend/adapters/payment"
 	"github.com/bid-hub/admin-backend/adapters/repository/postgres"
+	"github.com/bid-hub/admin-backend/adapters/service"
 	telegramadapter "github.com/bid-hub/admin-backend/adapters/telegram"
 	"github.com/bid-hub/admin-backend/core/domain"
+	"github.com/bid-hub/admin-backend/core/ports"
 	"github.com/bid-hub/admin-backend/core/services"
 	"github.com/bid-hub/admin-backend/core/services/chapapayment"
 	"github.com/bid-hub/admin-backend/core/services/lub"
@@ -295,13 +298,19 @@ func main() {
 		})
 	})
 
-	// Periodic automation: auto-close due auctions + fulfill stuck Chapa payments.
+	// Periodic automation: auto-close due auctions, winner payment deadlines and reminders,
+	// and fulfil stuck Chapa payments.
+	jobs, err := buildJobServices(db, cfg)
+	if err != nil {
+		slog.Error("Failed to set up background jobs", "error", err)
+		os.Exit(1)
+	}
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			if err := processDueProducts(ctx, db); err != nil {
+			if err := processDueProducts(ctx, jobs); err != nil {
 				slog.Warn("processDueProducts failed", "error", err)
 				if cfg.SentryDSN != "" {
 					sentry.WithScope(func(scope *sentry.Scope) {
@@ -311,7 +320,17 @@ func main() {
 					})
 				}
 			}
-			if n, err := retryUnprocessedPayments(ctx, db, cfg); err != nil {
+			if err := processWinnerPayments(ctx, jobs); err != nil {
+				slog.Warn("processWinnerPayments failed", "error", err)
+				if cfg.SentryDSN != "" {
+					sentry.WithScope(func(scope *sentry.Scope) {
+						scope.SetTag("type", "process_winner_payments_failure")
+						scope.SetTag("component", "background_job")
+						sentry.CaptureException(err)
+					})
+				}
+			}
+			if n, err := retryUnprocessedPayments(ctx, jobs, cfg); err != nil {
 				slog.Warn("retryUnprocessedPayments failed", "error", err)
 			} else if n > 0 {
 				slog.Info("retryUnprocessedPayments fulfilled", "count", n)
@@ -354,24 +373,15 @@ func main() {
 	slog.Info("Server gracefully stopped")
 }
 
-func processDueProducts(ctx context.Context, db *gorm.DB) error {
-	auctionRepo := postgres.NewAuctionRepository(db)
-	partRepo := postgres.NewAuctionParticipationRepository(db)
-	bidRepo := postgres.NewBidRepository(db)
-	auditRepo := postgres.NewAuditLogRepository(db)
-	auditSvc := services.NewAuditLogService(auditRepo)
-	notificationRepo := postgres.NewNotificationRepository(db)
-	userRepo := postgres.NewUserRepository(db)
-	participantUserRepo := postgres.NewParticipantUserRepository(db)
-	notifSvc := notifications.NewService(notificationRepo, userRepo, participantUserRepo, partRepo, nil, nil, nil)
-	lubSvc := lub.NewService(auctionRepo, partRepo, bidRepo, auditSvc, notifSvc, nil)
-	return lubSvc.ProcessDueAuctions(ctx)
+// jobServices wires the services the background jobs use with every notification channel
+// (in-app, Telegram, SMS, email), the same way the API does. Before pay-only-if-you-win the
+// scheduled draw used an in-app-only notifier, so winners of scheduled draws got no Telegram DM.
+type jobServices struct {
+	lub   *lub.Service
+	chapa *chapapayment.Service
 }
 
-func retryUnprocessedPayments(ctx context.Context, db *gorm.DB, cfg *env.Config) (int, error) {
-	if cfg == nil || strings.TrimSpace(cfg.ChapaSecretKey) == "" {
-		return 0, nil
-	}
+func buildJobServices(db *gorm.DB, cfg *env.Config) (*jobServices, error) {
 	auctionRepo := postgres.NewAuctionRepository(db)
 	partRepo := postgres.NewAuctionParticipationRepository(db)
 	bidRepo := postgres.NewBidRepository(db)
@@ -380,25 +390,57 @@ func retryUnprocessedPayments(ctx context.Context, db *gorm.DB, cfg *env.Config)
 	notificationRepo := postgres.NewNotificationRepository(db)
 	userRepo := postgres.NewUserRepository(db)
 	participantUserRepo := postgres.NewParticipantUserRepository(db)
-	notifSvc := notifications.NewService(notificationRepo, userRepo, participantUserRepo, partRepo, nil, nil, nil)
+
+	var emailSvc ports.EmailService
+	if es, err := service.NewResendEmailService(cfg); err == nil {
+		emailSvc = es
+	} else {
+		slog.Warn("background jobs: email disabled", "error", err)
+	}
+	smsSvc := sms.NewAfroMessageService(cfg)
+
+	notifSvc := notifications.NewService(notificationRepo, userRepo, participantUserRepo, partRepo, nil, emailSvc, smsSvc)
 	tgPoster := telegramadapter.NewChannelPoster(cfg, slog.Default())
 	notifSvc.SetTelegramMessenger(tgPoster)
+	notifSvc.SetAppURL(cfg.ParticipantAppURL)
+
 	lubSvc := lub.NewService(auctionRepo, partRepo, bidRepo, auditSvc, notifSvc, tgPoster)
 	paymentLedgerRepo := postgres.NewPaymentLedgerRepository(db)
 	chapaSvc := chapapayment.NewService(paymentLedgerRepo, lubSvc, participantUserRepo, notifSvc, slog.Default())
-
-	baseURL := cfg.ChapaBaseURL
-	if strings.TrimSpace(cfg.ChapaAPIURL) != "" {
-		baseURL = strings.TrimSpace(cfg.ChapaAPIURL)
-	}
-	chapaSvc.SetChapaClient(payment.NewChapaClient(cfg.ChapaSecretKey, baseURL))
 	chapaSvc.SetAdminNotifier(tgPoster)
+	if strings.TrimSpace(cfg.ChapaSecretKey) != "" {
+		baseURL := cfg.ChapaBaseURL
+		if strings.TrimSpace(cfg.ChapaAPIURL) != "" {
+			baseURL = strings.TrimSpace(cfg.ChapaAPIURL)
+		}
+		chapaSvc.SetChapaClient(payment.NewChapaClient(cfg.ChapaSecretKey, baseURL))
+	}
 
-	fulfilled, err := chapaSvc.RetryUnprocessedPayments(ctx, 50)
+	lubSvc.SetWinnerOffers(postgres.NewWinnerOfferRepository(db))
+	lubSvc.SetAdminNotifier(tgPoster)
+	lubSvc.SetWinnerPaymentChecker(chapaSvc)
+	lubSvc.SetContactLookup(notifSvc)
+	return &jobServices{lub: lubSvc, chapa: chapaSvc}, nil
+}
+
+func processDueProducts(ctx context.Context, jobs *jobServices) error {
+	return jobs.lub.ProcessDueAuctions(ctx)
+}
+
+// processWinnerPayments sends winner payment reminders and passes unpaid prizes on.
+func processWinnerPayments(ctx context.Context, jobs *jobServices) error {
+	return jobs.lub.ProcessWinnerPayments(ctx)
+}
+
+func retryUnprocessedPayments(ctx context.Context, jobs *jobServices, cfg *env.Config) (int, error) {
+	if cfg == nil || strings.TrimSpace(cfg.ChapaSecretKey) == "" {
+		return 0, nil
+	}
+	fulfilled, err := jobs.chapa.RetryUnprocessedPayments(ctx, 50)
 	if err != nil {
 		return fulfilled, err
 	}
-	reconciled, err := chapaSvc.ReconcilePendingPayments(ctx, 2*time.Minute, 50)
+	reconciled, err := jobs.chapa.ReconcilePendingPayments(ctx, 2*time.Minute, 50)
 	return fulfilled + reconciled, err
 }
 

@@ -8,8 +8,13 @@ import (
 )
 
 func participationNotificationCopy(productName string, feePaid domain.Money) (title string, message string, priority string) {
+	if feePaid.IsZero() {
+		return "Free ticket confirmed",
+			fmt.Sprintf("Your free ticket for '%s' is confirmed. You only pay your bid if you win.", productName),
+			domain.NotificationPriorityHigh
+	}
 	return "Ticket purchase confirmed",
-		fmt.Sprintf("Your payment of %s ETB for '%s' was successful. Your ticket is confirmed — you can place bids now.", feePaid.String(), productName),
+		fmt.Sprintf("Your payment of %s ETB for '%s' was successful. Your ticket is confirmed. You only pay your bid if you win.", feePaid.String(), productName),
 		domain.NotificationPriorityHigh
 }
 
@@ -17,6 +22,9 @@ func participationNotificationCopy(productName string, feePaid domain.Money) (ti
 const participationSMSURL = "carramarket.com"
 
 func participationSMSCopy(productName string, feePaid domain.Money, _ string) string {
+	if feePaid.IsZero() {
+		return trimSMS(fmt.Sprintf("CarraMarket: Your free ticket for '%s' is confirmed. You only pay your bid if you win: %s", productName, participationSMSURL), productName)
+	}
 	msg := fmt.Sprintf("CarraMarket: %s ETB paid for '%s'. Ticket confirmed. Place your bids: %s", feePaid.String(), productName, participationSMSURL)
 	if len(msg) > 300 {
 		// Trim the product name, never the link.
@@ -30,6 +38,9 @@ func participationSMSCopy(productName string, feePaid domain.Money, _ string) st
 }
 
 func participationTelegramCopy(productName string, feePaid domain.Money, txRef string) string {
+	if feePaid.IsZero() {
+		return fmt.Sprintf("🎟 Free ticket confirmed\n\n'%s'\nYou only pay your bid if you win.", productName)
+	}
 	msg := fmt.Sprintf("✅ Ticket confirmed\n\nPaid %s ETB for '%s'.\nYou can place bids now.", feePaid.String(), productName)
 	if txRef != "" {
 		msg = fmt.Sprintf("%s\nRef: %s", msg, txRef)

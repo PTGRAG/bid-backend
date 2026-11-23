@@ -25,6 +25,40 @@ const waivedPerUserIndexSQL = `DO $$ BEGIN
 	END IF;
 END $$;`
 
+// winnerOffersTableSQL creates the pay-only-if-you-win offers table (one row per winner offered
+// the prize; see domain.WinnerOffer).
+const winnerOffersTableSQL = `CREATE TABLE IF NOT EXISTS auction_winner_offers (
+	id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	auction_id     UUID NOT NULL REFERENCES auctions(id) ON UPDATE CASCADE ON DELETE CASCADE,
+	bid_id         UUID NOT NULL REFERENCES auction_bids(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+	participant_id UUID NOT NULL,
+	bid_value      DECIMAL(10,2) NOT NULL,
+	attempt        INTEGER NOT NULL,
+	status         VARCHAR(20) NOT NULL DEFAULT 'awaiting_payment',
+	due_at         TIMESTAMPTZ NOT NULL,
+	reminders_sent INTEGER NOT NULL DEFAULT 0,
+	paid_at        TIMESTAMPTZ,
+	payment_tx_ref VARCHAR(255),
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	CONSTRAINT chk_winner_offers_status CHECK (status IN ('awaiting_payment', 'paid', 'expired')),
+	CONSTRAINT chk_winner_offers_attempt CHECK (attempt BETWEEN 1 AND 3),
+	CONSTRAINT chk_winner_offers_reminders CHECK (reminders_sent BETWEEN 0 AND 2)
+)`
+
+// feePaidAllowsZeroSQL relaxes fee_paid > 0 to >= 0 once: a single free ticket costs nothing now
+// that the bid amount is only charged to the winner.
+const feePaidAllowsZeroSQL = `DO $$ BEGIN
+	IF EXISTS (
+		SELECT 1 FROM pg_constraint
+		WHERE conname = 'chk_participations_fee_paid'
+		  AND pg_get_constraintdef(oid) NOT LIKE '%>=%'
+	) THEN
+		ALTER TABLE auction_participations DROP CONSTRAINT chk_participations_fee_paid;
+		ALTER TABLE auction_participations ADD CONSTRAINT chk_participations_fee_paid CHECK (fee_paid >= 0);
+	END IF;
+END $$;`
+
 // EnsureSafeSchema applies additive, idempotent column patches that production
 // needs even when full AutoMigrate is skipped.
 func EnsureSafeSchema(db *gorm.DB) {
@@ -45,6 +79,23 @@ func EnsureSafeSchema(db *gorm.DB) {
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS bid_values TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS entrance_waived BOOLEAN NOT NULL DEFAULT false`,
 		waivedPerUserIndexSQL,
+		// Pay only if you win (see migrations/00017_pay_on_win.sql).
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'entry'`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS winner_offer_id UUID`,
+		`DO $$ BEGIN
+			ALTER TABLE payments ADD CONSTRAINT chk_payments_purpose CHECK (purpose IN ('entry', 'winner'));
+		EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+		`CREATE INDEX IF NOT EXISTS idx_payments_winner_offer ON payments (winner_offer_id)`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_results_email BOOLEAN NOT NULL DEFAULT false`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_results_telegram BOOLEAN NOT NULL DEFAULT false`,
+		winnerOffersTableSQL,
+		`CREATE INDEX IF NOT EXISTS idx_winner_offers_auction ON auction_winner_offers (auction_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_winner_offers_open_due ON auction_winner_offers (due_at) WHERE status = 'awaiting_payment'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_winner_offers_attempt ON auction_winner_offers (auction_id, attempt)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_winner_offers_one_open ON auction_winner_offers (auction_id) WHERE status = 'awaiting_payment'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_winner_offers_one_paid ON auction_winner_offers (auction_id) WHERE status = 'paid'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_winner_offers_participant ON auction_winner_offers (auction_id, participant_id)`,
+		feePaidAllowsZeroSQL,
 		`UPDATE auctions
 		 SET image_urls = jsonb_build_array(image_url)
 		 WHERE (image_urls IS NULL OR image_urls = '[]'::jsonb)
@@ -150,6 +201,7 @@ func Migrate(db *gorm.DB) {
 		&domain.AuctionParticipation{},
 		&domain.Bid{},
 		&domain.Payment{},
+		// domain.WinnerOffer is created by EnsureSafeSchema (raw DDL with CHECKs and partial indexes).
 		&domain.RefundRecord{},
 		&domain.Notification{},
 		&domain.AuditLog{},
@@ -181,9 +233,9 @@ func Migrate(db *gorm.DB) {
 		EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
 		waivedPerUserIndexSQL,
 
-		// Auction participations constraints (fee_paid is always > 0: free entrance still pays the bid)
+		// Auction participations constraints (fee_paid may be 0: a single free ticket costs nothing)
 		`DO $$ BEGIN
-			ALTER TABLE auction_participations ADD CONSTRAINT chk_participations_fee_paid CHECK (fee_paid > 0);
+			ALTER TABLE auction_participations ADD CONSTRAINT chk_participations_fee_paid CHECK (fee_paid >= 0);
 		EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
 		`DO $$ BEGIN
 			ALTER TABLE auction_participations ADD CONSTRAINT fk_participations_auction FOREIGN KEY (auction_id) REFERENCES auctions(id) ON UPDATE CASCADE ON DELETE CASCADE;
@@ -235,6 +287,10 @@ func Migrate(db *gorm.DB) {
 			slog.Warn("database: constraint setup warning", "error", err)
 		}
 	}
+
+	// Second pass: on a fresh database the first pass ran before AutoMigrate created the tables
+	// these patches build on (e.g. auction_winner_offers references auctions and auction_bids).
+	EnsureSafeSchema(db)
 }
 
 func Connect(cfg *env.Config) (*gorm.DB, error) {

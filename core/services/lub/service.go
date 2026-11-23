@@ -2,6 +2,7 @@ package lub
 
 import (
 	"context"
+	"time"
 
 	"github.com/bid-hub/admin-backend/core/domain"
 	"github.com/bid-hub/admin-backend/core/ports"
@@ -16,6 +17,13 @@ type Service struct {
 	audit             ports.AuditLogService
 	notificationSvc   LUBNotificationProvider
 	telegramPoster    TelegramChannelPoster
+
+	// Pay only if you win (optional; see winner.go).
+	winnerOffers   ports.WinnerOfferRepository
+	admin          ports.AdminNotifier
+	paymentChecker WinnerPaymentChecker
+	contacts       ParticipantContactLookup
+	now            func() time.Time // tests override the clock
 }
 
 // LUBNotificationProvider is the subset of notification methods LUB triggers.

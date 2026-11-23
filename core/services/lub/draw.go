@@ -55,6 +55,7 @@ func (s *Service) ExecuteDraw(ctx context.Context, auctionID uuid.UUID, trigger 
 		s.notify(func() error {
 			return s.notificationSvc.NotifyAuctionNoWinner(ctx, auctionID, a.Title)
 		})
+		s.alertAdmin(ctx, fmt.Sprintf("🤷 Draw found no unique bid\nauction: %s (%s)", a.Title, auctionID.String()))
 		return result, nil
 	}
 
@@ -66,6 +67,15 @@ func (s *Service) ExecuteDraw(ctx context.Context, auctionID uuid.UUID, trigger 
 	a.WinnerBidID = &winningBid.ID
 	a.WinnerParticipantID = &winningBid.ParticipantID
 	a.WinnerBidValue = &winningBid.BidValue
+
+	// Pay only if you win: open the winner's payment offer before the auction is marked executed,
+	// so a failure here leaves it "closed" and the draw can simply be run again.
+	if s.winnerOffers != nil {
+		if _, err := s.openWinnerOffer(ctx, a, winningBid, 1); err != nil {
+			return nil, fmt.Errorf("draw: %w", err)
+		}
+	}
+
 	a.ExecutedAt = &now
 	a.Status = domain.AuctionStatusExecuted
 
@@ -83,9 +93,16 @@ func (s *Service) ExecuteDraw(ctx context.Context, auctionID uuid.UUID, trigger 
 		fmt.Sprintf("trigger=%s winner=%s bid_value=%.2f",
 			trigger, winningBid.ParticipantID, winningBid.BidValue.Float64()))
 
-	s.notify(func() error {
-		return s.notificationSvc.NotifyAuctionWinner(ctx, winningBid.ParticipantID, auctionID, a.Title, winningBid.BidValue)
-	})
+	if s.winnerOffers == nil {
+		s.notify(func() error {
+			return s.notificationSvc.NotifyAuctionWinner(ctx, winningBid.ParticipantID, auctionID, a.Title, winningBid.BidValue)
+		})
+	}
+	if n := s.winnerNotifier(); n != nil {
+		s.notify(func() error {
+			return n.NotifyAuctionResultLosers(ctx, auctionID, a.Title, winningBid.ParticipantID)
+		})
+	}
 
 	return result, nil
 }

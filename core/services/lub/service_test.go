@@ -191,6 +191,10 @@ func (m *mockBidRepo) MarkWinner(aid, winner uuid.UUID) error {
 	}
 	return nil
 }
+func (m *mockBidRepo) FindWinnerExcluding(aid uuid.UUID, exclude []string) (*domain.Bid, error) {
+	return nil, nil
+}
+func (m *mockBidRepo) MoveWinner(aid, winner uuid.UUID) error { return nil }
 func (m *mockBidRepo) DeleteBid(id uuid.UUID) error { return nil }
 
 func (m *mockBidRepo) GetCountByMonth(lastMonths int) ([]domain.MonthlyCount, error) {

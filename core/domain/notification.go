@@ -37,6 +37,10 @@ const (
 	NotificationTypeBidUpdated             = "bid_updated"
 	NotificationTypeAuctionWinner          = "auction_winner"
 	NotificationTypeAuctionNoWinner        = "auction_no_winner"
+	NotificationTypeAuctionResult          = "auction_result"          // draw done, you did not win
+	NotificationTypeWinnerPaymentReminder  = "winner_payment_reminder" // you won, deadline approaching
+	NotificationTypeWinnerPaymentExpired   = "winner_payment_expired"  // you won but did not pay in time
+	NotificationTypeWinnerPaid             = "winner_paid"             // your winning payment went through
 	NotificationTypeAuctionActivated       = "auction_activated"
 	NotificationTypeAuctionClosed          = "auction_closed"
 	NotificationTypeAuctionPostponed       = "auction_postponed"
