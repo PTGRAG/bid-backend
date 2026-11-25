@@ -241,6 +241,7 @@ func (s *Service) MarkWinnerOfferPaid(ctx context.Context, offerID uuid.UUID, tx
 			return n.NotifyWinnerPaid(ctx, offer.ParticipantID, offer.AuctionID, title, amount, txRef)
 		})
 	}
+	s.creditNearMissesAfterPayment(ctx, offer.AuctionID, title)
 	s.alertAdmin(ctx, fmt.Sprintf(
 		"💰 Winner paid. Arrange delivery.\nauction: %s (%s)\nwinner: %s\npaid: %s ETB\ntx_ref: %s",
 		title, offer.AuctionID.String(), s.describeParticipant(offer.ParticipantID), amount.String(), txRef,

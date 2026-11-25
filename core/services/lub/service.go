@@ -23,7 +23,8 @@ type Service struct {
 	admin          ports.AdminNotifier
 	paymentChecker WinnerPaymentChecker
 	contacts       ParticipantContactLookup
-	now            func() time.Time // tests override the clock
+	freeBids       ports.FreeBidRepository // near-miss free bids (optional; see near_miss.go)
+	now            func() time.Time        // tests override the clock
 }
 
 // LUBNotificationProvider is the subset of notification methods LUB triggers.
