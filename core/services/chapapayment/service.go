@@ -429,6 +429,9 @@ func (s *Service) ProcessVerified(ctx context.Context, snap *VerifiedSnapshot) e
 	if s.metrics != nil {
 		s.metrics.RecordPaymentSuccess(pricePaid.Float64())
 	}
+	if checkoutRow != nil && checkoutRow.Status == domain.PaymentStatusFailed && checkoutRow.FreeBidsUsed > 0 {
+		s.checkFreeBidsAfterLatePayment(ctx, txRef, userID, auctionID, checkoutRow.FreeBidsUsed)
+	}
 
 	return s.fulfillEntry(ctx, p, auctionID, userID, pricePaid, waived, snap)
 }
@@ -698,20 +701,107 @@ func (s *Service) AbortAbandonedCheckout(ctx context.Context, p *domain.Payment,
 	s.log.Info("chapa_abandoned_checkout_failed", "tx_ref", txRef, "reason", reason)
 }
 
+// CheckoutRequest is one ticket checkout to record before sending the customer to Chapa.
+type CheckoutRequest struct {
+	TxRef     string
+	UserID    uuid.UUID
+	AuctionID uuid.UUID
+	Amount    domain.Money
+	// Waived reserves the auction's free-entrance slot (first ticket free).
+	Waived bool
+	// FreeBids is how many near-miss free bids the checkout spends.
+	FreeBids  int
+	BidValues []domain.Money
+}
+
+// CreateCheckoutPayment records a pending ticket checkout. Free-entrance slots and free bids are
+// reserved in the same transaction as the ledger row; domain.ErrFreeEntranceUnavailable or
+// domain.ErrFreeBidsUnavailable mean the quote is out of date.
+func (s *Service) CreateCheckoutPayment(ctx context.Context, req CheckoutRequest) error {
+	if req.FreeBids < 0 {
+		return fmt.Errorf("free bids cannot be negative: %w", domain.ErrInvalidInput)
+	}
+	if req.Waived {
+		return s.createWaivedPending(ctx, req)
+	}
+	if req.FreeBids == 0 {
+		return s.CreatePendingPayment(ctx, req.TxRef, req.UserID, req.AuctionID, req.Amount, req.BidValues...)
+	}
+	p := &domain.Payment{
+		TxRef:        req.TxRef,
+		UserID:       ptrUUID(req.UserID),
+		AuctionID:    ptrUUID(req.AuctionID),
+		Amount:       req.Amount,
+		BidValues:    encodeBidValues(req.BidValues),
+		FreeBidsUsed: req.FreeBids,
+	}
+	if err := s.repo.CreatePendingWithFreeBids(ctx, p); err != nil {
+		if errors.Is(err, domain.ErrFreeBidsUnavailable) {
+			return err
+		}
+		return fmt.Errorf("chapa: create free-bid pending payment: %w", err)
+	}
+	if len(req.BidValues) > 0 {
+		s.SetPendingBids(req.TxRef, req.BidValues)
+	}
+	s.log.Info("chapa_free_bid_pending_payment_created", "tx_ref", req.TxRef, "user_id", req.UserID, "auction_id", req.AuctionID, "amount", req.Amount.String(), "free_bids", req.FreeBids)
+	return nil
+}
+
+// AbortCheckout fails a pending checkout that never reached Chapa (or will never be paid), giving
+// back its free-entrance slot and free bids.
+func (s *Service) AbortCheckout(ctx context.Context, txRef, reason string) {
+	row, err := s.repo.GetByTxRef(ctx, strings.TrimSpace(txRef))
+	if err != nil || row == nil || row.Status != domain.PaymentStatusPending {
+		return
+	}
+	s.AbortAbandonedCheckout(ctx, row, reason)
+}
+
+// FreeBidBalance returns the customer's available near-miss free bids.
+func (s *Service) FreeBidBalance(ctx context.Context, userID uuid.UUID) (int, error) {
+	return s.repo.FreeBidBalance(ctx, userID)
+}
+
+// checkFreeBidsAfterLatePayment alerts staff when a released free-bid checkout was paid after its
+// free bids were spent elsewhere (the customer got more free tickets than they earned).
+func (s *Service) checkFreeBidsAfterLatePayment(ctx context.Context, txRef string, userID, auctionID uuid.UUID, freeBids int) {
+	over, err := s.repo.FreeBidsOverspent(ctx, userID)
+	if err != nil {
+		s.log.Error("free_bids_overspend_check_failed", "tx_ref", txRef, "error", err)
+		return
+	}
+	if !over {
+		return
+	}
+	s.log.Warn("free_bids_overspent", "tx_ref", txRef, "user_id", userID.String())
+	s.capturePaymentIssue(txRef, "free_bids_overspent", nil)
+	s.alertAdmin(ctx, fmt.Sprintf(
+		"⚠️ Free-bid checkout paid after it was released; the customer now holds more free bids than earned\ntx_ref: %s\nauction: %s\nuser: %s\nfree bids on this checkout: %d",
+		txRef, auctionID.String(), userID.String(), freeBids,
+	))
+}
+
 // CreateWaivedPendingPayment records a checkout whose entrance fee is waived by the free-entrance
 // promo. amount must be the bid total only. The slot reservation and the ledger row are created
 // in one transaction; domain.ErrFreeEntranceUnavailable means the slot is no longer available.
 func (s *Service) CreateWaivedPendingPayment(ctx context.Context, txRef string, userID, auctionID uuid.UUID, amount domain.Money, bidValues ...domain.Money) error {
+	return s.createWaivedPending(ctx, CheckoutRequest{TxRef: txRef, UserID: userID, AuctionID: auctionID, Amount: amount, Waived: true, BidValues: bidValues})
+}
+
+func (s *Service) createWaivedPending(ctx context.Context, req CheckoutRequest) error {
+	txRef, userID, auctionID, amount, bidValues := req.TxRef, req.UserID, req.AuctionID, req.Amount, req.BidValues
 	p := &domain.Payment{
-		TxRef:     txRef,
-		UserID:    ptrUUID(userID),
-		AuctionID: ptrUUID(auctionID),
-		Amount:    amount,
-		BidValues: encodeBidValues(bidValues),
-		Status:    domain.PaymentStatusPending,
+		TxRef:        txRef,
+		UserID:       ptrUUID(userID),
+		AuctionID:    ptrUUID(auctionID),
+		Amount:       amount,
+		BidValues:    encodeBidValues(bidValues),
+		FreeBidsUsed: req.FreeBids,
+		Status:       domain.PaymentStatusPending,
 	}
 	if err := s.repo.CreateWaivedPending(ctx, p); err != nil {
-		if errors.Is(err, domain.ErrFreeEntranceUnavailable) {
+		if errors.Is(err, domain.ErrFreeEntranceUnavailable) || errors.Is(err, domain.ErrFreeBidsUnavailable) {
 			return err
 		}
 		return fmt.Errorf("chapa: create waived pending payment: %w", err)
@@ -820,17 +910,17 @@ func (s *Service) ReconcilePendingPayments(ctx context.Context, olderThan time.D
 			case isChapaUnknownTx(vErr) && age > abandonedCheckoutTTL:
 				// Chapa has no record of this ref: stop retrying every minute.
 				s.AbortAbandonedCheckout(ctx, &rows[i], "expired: checkout unknown to Chapa")
-			case rows[i].EntranceWaived && age > 24*time.Hour:
-				// Transient verify errors for a free-entrance hold: give the slot back eventually.
-				s.AbortWaivedCheckout(ctx, txRef, "expired: checkout unverifiable at Chapa")
+			case (rows[i].EntranceWaived || rows[i].FreeBidsUsed > 0) && age > 24*time.Hour:
+				// Transient verify errors for a free hold: give the slot / free bids back eventually.
+				s.AbortAbandonedCheckout(ctx, &rows[i], "expired: checkout unverifiable at Chapa")
 			}
 			continue
 		}
 		status := strings.TrimSpace(snap.Status)
 		if IsChapaStatusInFlight(status) {
-			// An unpaid free-entrance checkout must not hold a slot forever.
-			if rows[i].EntranceWaived && time.Since(rows[i].CreatedAt) > waivedCheckoutTTL {
-				s.AbortWaivedCheckout(ctx, txRef, "expired: unpaid free-entrance checkout")
+			// An unpaid free-entrance or free-bid checkout must not hold its reservation forever.
+			if (rows[i].EntranceWaived || rows[i].FreeBidsUsed > 0) && time.Since(rows[i].CreatedAt) > waivedCheckoutTTL {
+				s.AbortAbandonedCheckout(ctx, &rows[i], "expired: unpaid free checkout")
 			}
 			continue
 		}

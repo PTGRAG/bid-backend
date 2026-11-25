@@ -36,6 +36,13 @@ type PaymentLedgerRepository interface {
 	// domain.ErrFreeEntranceUnavailable when the promo is off, the slots are gone, or the
 	// customer already holds / used a free entrance.
 	CreateWaivedPending(ctx context.Context, p *domain.Payment) error
+	// CreatePendingWithFreeBids records a pending checkout that spends p.FreeBidsUsed near-miss
+	// free bids, checking the balance in the same transaction (domain.ErrFreeBidsUnavailable).
+	CreatePendingWithFreeBids(ctx context.Context, p *domain.Payment) error
+	// FreeBidBalance returns the customer's available free bids.
+	FreeBidBalance(ctx context.Context, userID uuid.UUID) (int, error)
+	// FreeBidsOverspent reports whether held free bids exceed earned ones.
+	FreeBidsOverspent(ctx context.Context, userID uuid.UUID) (bool, error)
 	// FailPendingWaived marks a still-pending waived payment failed and releases its slot.
 	// released=false means the row was not (or no longer) a pending waived reservation.
 	FailPendingWaived(ctx context.Context, txRef string, reason string) (released bool, err error)

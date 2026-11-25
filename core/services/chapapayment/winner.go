@@ -14,15 +14,15 @@ import (
 // Pay only if you win: tickets cost the entrance fee only (a single free ticket costs nothing and
 // skips Chapa), and the winner pays their bid amount after the draw through a "winner" payment.
 
-// FulfillFreeCheckout completes a free-entrance checkout whose total is 0 (one free ticket): there
-// is nothing to charge, so the ticket is issued right away without going through Chapa.
+// FulfillFreeCheckout completes a checkout whose total is 0 (a free-entrance ticket and/or tickets
+// covered by near-miss free bids): there is nothing to charge, so the ticket is issued right away without going through Chapa.
 func (s *Service) FulfillFreeCheckout(ctx context.Context, txRef string) error {
 	txRef = strings.TrimSpace(txRef)
 	row, err := s.repo.GetByTxRef(ctx, txRef)
 	if err != nil {
 		return err
 	}
-	if row.UserID == nil || row.AuctionID == nil || !row.EntranceWaived || !row.Amount.IsZero() ||
+	if row.UserID == nil || row.AuctionID == nil || (!row.EntranceWaived && row.FreeBidsUsed == 0) || !row.Amount.IsZero() ||
 		row.Purpose == domain.PaymentPurposeWinner {
 		return fmt.Errorf("checkout %s is not a free ticket: %w", txRef, domain.ErrInvalidInput)
 	}
@@ -40,7 +40,7 @@ func (s *Service) FulfillFreeCheckout(ctx context.Context, txRef string) error {
 	if err := s.repo.Upsert(ctx, p); err != nil {
 		return fmt.Errorf("free ticket ledger upsert: %w", err)
 	}
-	return s.fulfillEntry(ctx, p, *row.AuctionID, *row.UserID, domain.Zero(), true, &VerifiedSnapshot{TxRef: txRef})
+	return s.fulfillEntry(ctx, p, *row.AuctionID, *row.UserID, domain.Zero(), row.EntranceWaived, &VerifiedSnapshot{TxRef: txRef})
 }
 
 // CreateWinnerPendingPayment records the winner's checkout for their bid amount.
