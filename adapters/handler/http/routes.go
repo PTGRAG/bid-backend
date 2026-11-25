@@ -99,6 +99,7 @@ func RegisterRoutes(app *fiber.App, db *gorm.DB, redisClient *goredis.Client, cf
 	auctionService.SetAdminNotifier(telegramPoster)
 	auctionService.SetWinnerPaymentChecker(chapaPaymentSvc)
 	auctionService.SetContactLookup(notificationService)
+	auctionService.SetFreeBids(postgres.NewFreeBidRepository(db))
 	auctionAdminHandler := NewAuctionAdminHandler(auctionService)
 	auctionHandler := NewAuctionHandler(auctionService, chapaPaymentSvc, chapaClient, userRepo, cfg)
 
@@ -247,6 +248,8 @@ func registerPublicAuctionRoutes(api fiber.Router, optionalAuth fiber.Handler, p
 	api.Get("/public/auctions/:auctionId/my-participation", optionalAuth, publicHandler.GetMyParticipation)
 	// Pay only if you win: the winner pays their bid amount after the draw.
 	api.Post("/public/auctions/:auctionId/winner-payment", optionalAuth, publicHandler.PayWinningBid)
+	// Near-miss free bids of the signed-in customer.
+	api.Get("/public/free-bids/me", optionalAuth, publicHandler.GetMyFreeBids)
 	api.Post("/public/payments/verify", optionalAuth, publicHandler.VerifyChapaPayment)
 	api.Get("/public/payments/verify/:txRef", optionalAuth, publicHandler.VerifyChapaPayment)
 	api.Post("/webhooks/chapa", publicHandler.ChapaWebhook)
@@ -267,4 +270,8 @@ func registerAdminAuctionRoutes(protected fiber.Router, adminHandler *AuctionAdm
 	auctions.Get("/:id/participants", adminHandler.ListParticipants)
 	auctions.Get("/:id/bids", adminHandler.ListBids)
 	auctions.Get("/:id/winner-offers", adminHandler.ListWinnerOffers)
+	auctions.Get("/:id/free-bids", adminHandler.ListAuctionFreeBids)
+	auctions.Post("/:id/free-bids/credit", adminHandler.CreditAuctionFreeBids)
+	protected.Get("/near-miss/settings", adminHandler.GetNearMissSettings)
+	protected.Put("/near-miss/settings", adminHandler.UpdateNearMissSettings)
 }

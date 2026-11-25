@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -113,6 +114,28 @@ type AuctionAuditEntry struct {
 	Count    int   `json:"count"`
 	IsUnique bool  `json:"isUnique"`
 	IsWinner bool  `json:"isWinner"`
+	// Bidder is a masked name ("Ab*** K.") shown for the lowest unique bids only.
+	Bidder string `json:"bidder,omitempty"`
+	// FreeBid marks a near-miss bid whose owner got a free bid.
+	FreeBid bool `json:"freeBid,omitempty"`
+}
+
+// MaskName hides most of a customer's name for public results: "Abebe Kebede" -> "Ab*** K.".
+func MaskName(full string) string {
+	parts := strings.Fields(full)
+	if len(parts) == 0 {
+		return "Bidder"
+	}
+	first := []rune(parts[0])
+	keep := 2
+	if len(first) <= 2 {
+		keep = 1
+	}
+	out := string(first[:keep]) + "***"
+	if len(parts) > 1 {
+		out += " " + string([]rune(parts[len(parts)-1])[:1]) + "."
+	}
+	return out
 }
 
 // AuctionAudit represents the published public audit results of a completed auction.
