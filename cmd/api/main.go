@@ -339,6 +339,21 @@ func main() {
 		}
 	}()
 
+	// Referral qualification: count referred signups that bought a paid ticket (dashboard reads
+	// also run it, so this only keeps the numbers fresh when nobody is looking).
+	referralSvc := handler.NewReferralService(db, postgres.NewUserRepository(db), nil, cfg)
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			if _, err := referralSvc.Sweep(ctx); err != nil {
+				slog.Warn("referral sweep failed", "error", err)
+			}
+			cancel()
+		}
+	}()
+
 	// 6. Start Server in a goroutine
 	go func() {
 		if err := app.Listen(fmt.Sprintf(":%s", cfg.AppPort)); err != nil {
