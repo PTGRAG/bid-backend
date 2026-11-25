@@ -125,11 +125,11 @@ func TestFreeBidsApplicable(t *testing.T) {
 	}
 }
 
-func TestMaskName(t *testing.T) {
+func TestMaskBidderName(t *testing.T) {
 	cases := map[string]string{"Abebe Kebede": "Ab*** K.", "Abebe": "Ab***", "Al": "A***", "": "Bidder", "Selam T Bekele": "Se*** B."}
 	for in, want := range cases {
-		if got := MaskName(in); got != want {
-			t.Fatalf("MaskName(%q) = %q, want %q", in, got, want)
+		if got := MaskBidderName(in); got != want {
+			t.Fatalf("MaskBidderName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

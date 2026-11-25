@@ -120,8 +120,8 @@ type AuctionAuditEntry struct {
 	FreeBid bool `json:"freeBid,omitempty"`
 }
 
-// MaskName hides most of a customer's name for public results: "Abebe Kebede" -> "Ab*** K.".
-func MaskName(full string) string {
+// MaskBidderName hides most of a customer's name for public results: "Abebe Kebede" -> "Ab*** K.".
+func MaskBidderName(full string) string {
 	parts := strings.Fields(full)
 	if len(parts) == 0 {
 		return "Bidder"

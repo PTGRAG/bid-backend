@@ -327,7 +327,7 @@ func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, er
 			// stays checkable without exposing every customer.
 			if masked < auditMaskedBidders && s.contacts != nil {
 				name, _, _ := s.contacts.ParticipantContact(g.participant)
-				entries[i].Bidder = domain.MaskName(name)
+				entries[i].Bidder = domain.MaskBidderName(name)
 				masked++
 			}
 		}
