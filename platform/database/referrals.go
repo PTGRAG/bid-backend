@@ -105,6 +105,30 @@ var referralSchemaSQL = []string{
 		CONSTRAINT chk_referral_payouts_amount CHECK (amount > 0)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_referral_payouts_code ON referral_payouts (code_id, paid_at)`,
+
+	// Self-serve agents: where each code owner wants to be paid, and the staff switch that lets
+	// participants become agents themselves.
+	`ALTER TABLE referral_codes ADD COLUMN IF NOT EXISTS payout_method VARCHAR(20) NOT NULL DEFAULT ''`,
+	`ALTER TABLE referral_codes ADD COLUMN IF NOT EXISTS payout_bank VARCHAR(60) NOT NULL DEFAULT ''`,
+	`ALTER TABLE referral_codes ADD COLUMN IF NOT EXISTS payout_account VARCHAR(40) NOT NULL DEFAULT ''`,
+	`ALTER TABLE referral_codes ADD COLUMN IF NOT EXISTS payout_name VARCHAR(120) NOT NULL DEFAULT ''`,
+	// One payout account per code: two agents can't be paid into the same wallet or bank account.
+	`CREATE UNIQUE INDEX IF NOT EXISTS ux_referral_codes_payout ON referral_codes (payout_method, payout_bank, payout_account) WHERE payout_account <> ''`,
+	`CREATE TABLE IF NOT EXISTS referral_settings (
+		id                INTEGER PRIMARY KEY CHECK (id = 1),
+		agent_signup_open BOOLEAN NOT NULL DEFAULT true,
+		updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_by        UUID
+	)`,
+	`INSERT INTO referral_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
+}
+
+// referralOptionalSQL are backstops that can fail on data staff created before they existed
+// (e.g. two agent codes for one person). A failure is logged and the service-level check still
+// applies.
+var referralOptionalSQL = []string{
+	// One agent code per account.
+	`CREATE UNIQUE INDEX IF NOT EXISTS ux_referral_codes_agent_owner ON referral_codes (owner_user_id) WHERE kind = 'agent' AND owner_user_id IS NOT NULL`,
 }
 
 // ensureReferralSchema creates the referral tables and the default program for each kind.
@@ -119,6 +143,11 @@ func ensureReferralSchema(db *gorm.DB) {
 		if err := db.Exec(stmt).Error; err != nil {
 			slog.Error("database: referral schema patch failed", "error", err)
 			return
+		}
+	}
+	for _, stmt := range referralOptionalSQL {
+		if err := db.Exec(stmt).Error; err != nil {
+			slog.Warn("database: optional referral index skipped", "error", err)
 		}
 	}
 	for _, kind := range []string{domain.ReferralKindAgent, domain.ReferralKindInfluencer} {
