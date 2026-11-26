@@ -3,6 +3,7 @@ package postgres
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -573,6 +574,80 @@ func (r *ReferralRepo) ListPayouts(codeIDs []uuid.UUID) ([]domain.ReferralPayout
 	}
 	err := r.db.Where("code_id IN ?", codeIDs).Order("paid_at DESC").Find(&out).Error
 	return out, err
+}
+
+// ---- Self-serve agents ----
+
+func (r *ReferralRepo) GetSettings() (*domain.ReferralSettings, error) {
+	var st domain.ReferralSettings
+	err := r.db.Where("id = 1").First(&st).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return &domain.ReferralSettings{ID: 1, AgentSignupOpen: true}, nil
+	}
+	return &st, err
+}
+
+func (r *ReferralRepo) UpdateSettings(st *domain.ReferralSettings) error {
+	st.ID = 1
+	st.UpdatedAt = time.Now().UTC()
+	return r.db.Exec(`INSERT INTO referral_settings (id, agent_signup_open, updated_at, updated_by)
+		VALUES (1, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET agent_signup_open = EXCLUDED.agent_signup_open,
+			updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by`,
+		st.AgentSignupOpen, st.UpdatedAt, st.UpdatedBy).Error
+}
+
+// agentLockKey is an arbitrary constant for pg_advisory_xact_lock.
+const agentLockKey = 7_301_202_612
+
+func (r *ReferralRepo) WithAgentLock(fn func(repo ports.ReferralRepository) error) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", agentLockKey).Error; err != nil {
+			return err
+		}
+		return fn(&ReferralRepo{db: tx})
+	})
+}
+
+// phoneDigitsSQL mirrors domain.PhoneDigits for a phone column.
+const phoneDigitsSQL = `(CASE
+	WHEN regexp_replace(%[1]s, '\D', '', 'g') ~ '^0[0-9]{9}$' THEN '251' || substr(regexp_replace(%[1]s, '\D', '', 'g'), 2)
+	WHEN regexp_replace(%[1]s, '\D', '', 'g') ~ '^[79][0-9]{8}$' THEN '251' || regexp_replace(%[1]s, '\D', '', 'g')
+	ELSE regexp_replace(%[1]s, '\D', '', 'g') END)`
+
+func (r *ReferralRepo) AgentPhoneTaken(phoneDigits string, exceptUser uuid.UUID) (bool, error) {
+	if phoneDigits == "" {
+		return false, nil
+	}
+	var n int64
+	err := r.db.Table("referral_codes rc").
+		Joins("JOIN users u ON u.id = rc.owner_user_id").
+		Where("rc.kind = ? AND u.id <> ? AND COALESCE(u.phone, '') <> ''", domain.ReferralKindAgent, exceptUser).
+		Where(fmt.Sprintf(phoneDigitsSQL, "u.phone")+" = ?", phoneDigits).
+		Count(&n).Error
+	return n > 0, err
+}
+
+func (r *ReferralRepo) PayoutAccountTaken(p domain.ReferralPayoutAccount, exceptCode uuid.UUID) (bool, error) {
+	var n int64
+	err := r.db.Model(&domain.ReferralCode{}).
+		Where("payout_method = ? AND payout_bank = ? AND payout_account = ? AND id <> ?", p.Method, p.Bank, p.Account, exceptCode).
+		Count(&n).Error
+	return n > 0, err
+}
+
+func (r *ReferralRepo) SetPayoutAccount(codeID uuid.UUID, p domain.ReferralPayoutAccount) error {
+	err := r.db.Model(&domain.ReferralCode{}).Where("id = ?", codeID).Updates(map[string]interface{}{
+		"payout_method":  p.Method,
+		"payout_bank":    p.Bank,
+		"payout_account": p.Account,
+		"payout_name":    p.Name,
+		"updated_at":     time.Now().UTC(),
+	}).Error
+	if _, ok := pgUniqueViolation(err); ok {
+		return domain.NewAppError(409, "That payout account is already used by another agent", domain.ErrConflict)
+	}
+	return err
 }
 
 func mustJSON(v interface{}) string {

@@ -254,6 +254,15 @@ func (s *Service) CreateCode(ctx context.Context, actor uuid.UUID, auditCtx *dom
 	if owner == nil && in.Kind == domain.ReferralKindAgent {
 		return nil, badRequest("An agent code needs the agent's account (their phone number)")
 	}
+	if in.Kind == domain.ReferralKindAgent {
+		existing, err := s.agentCodeOf(s.repo, owner.ID)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return nil, domain.NewAppError(409, "This person is already an agent (code "+existing.Code+")", domain.ErrConflict)
+		}
+	}
 	label := ""
 	if in.Label != nil {
 		label = clip(*in.Label, 120)

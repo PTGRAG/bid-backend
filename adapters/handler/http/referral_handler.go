@@ -8,6 +8,7 @@ import (
 	"github.com/bid-hub/admin-backend/adapters/handler/response"
 	"github.com/bid-hub/admin-backend/core/domain"
 	"github.com/bid-hub/admin-backend/core/ports"
+	"github.com/bid-hub/admin-backend/core/services"
 	"github.com/bid-hub/admin-backend/core/services/referral"
 	"github.com/bid-hub/admin-backend/platform/apiresponse"
 	"github.com/bid-hub/admin-backend/platform/validate"
@@ -20,6 +21,14 @@ import (
 // staff referral screens.
 type ReferralHandler struct {
 	svc *referral.Service
+	// verifyPhone checks a phone verification token from /auth/verify-otp and returns its
+	// phone; it lets an account without a phone add one while becoming an agent.
+	verifyPhone func(token, purpose string) (string, error)
+}
+
+// SetPhoneVerifier wires the phone verification token check (AuthService.VerifyPhoneToken).
+func (h *ReferralHandler) SetPhoneVerifier(fn func(token, purpose string) (string, error)) {
+	h.verifyPhone = fn
 }
 
 func NewReferralHandler(svc *referral.Service) *ReferralHandler {
@@ -43,6 +52,7 @@ func registerPublicReferralRoutes(api fiber.Router, h *ReferralHandler, limiterS
 		},
 		Storage: limiterStorage,
 	})
+	api.Get("/public/agent-program", h.AgentProgram)
 	api.Get("/public/referrals/:code", h.Lookup)
 	api.Post("/public/referrals/:code/click", clickLimit, h.Click)
 }
@@ -54,9 +64,15 @@ func registerReferralRoutes(protected fiber.Router, h *ReferralHandler) {
 	protected.Get("/referrals/me/referrals", h.MyReferrals)
 	protected.Get("/referrals/me/activity", h.MyActivity)
 	protected.Get("/referrals/me/payouts", h.MyPayouts)
+	protected.Put("/referrals/me/payout-account", h.SetMyPayoutAccount)
+	// Self-serve: become an agent.
+	protected.Get("/referrals/agent", h.AgentJoinInfo)
+	protected.Post("/referrals/agent", h.JoinAsAgent)
 
 	// Staff.
 	protected.Post("/referrals/sweep", h.Sweep)
+	protected.Get("/referral-settings", h.GetSettings)
+	protected.Put("/referral-settings", h.UpdateSettings)
 	protected.Get("/referral-programs", h.ListPrograms)
 	protected.Post("/referral-programs", h.CreateProgram)
 	protected.Patch("/referral-programs/:id", h.UpdateProgram)
@@ -229,7 +245,113 @@ func (h *ReferralHandler) MyPayouts(c fiber.Ctx) error {
 	return response.Success(c, fiber.StatusOK, "Referral payouts", p)
 }
 
+func (h *ReferralHandler) AgentProgram(c fiber.Ctx) error {
+	info, err := h.svc.AgentProgram(c.Context())
+	if err != nil {
+		return referralError(c, err)
+	}
+	return response.Success(c, fiber.StatusOK, "Agent program", info)
+}
+
+func (h *ReferralHandler) AgentJoinInfo(c fiber.Ctx) error {
+	userID, ok := currentUser(c)
+	if !ok {
+		return nil
+	}
+	info, err := h.svc.AgentJoinInfo(c.Context(), userID)
+	if err != nil {
+		return referralError(c, err)
+	}
+	return response.Success(c, fiber.StatusOK, "Agent signup", info)
+}
+
+type joinAgentRequest struct {
+	AcceptTerms       bool   `json:"acceptTerms"`
+	Phone             string `json:"phone" validate:"omitempty,max=32"`
+	VerificationToken string `json:"verificationToken" validate:"omitempty,max=2048"`
+}
+
+func (h *ReferralHandler) JoinAsAgent(c fiber.Ctx) error {
+	userID, ok := currentUser(c)
+	if !ok {
+		return nil
+	}
+	var req joinAgentRequest
+	if err := validate.BindAndValidate(c, &req); err != nil {
+		return err
+	}
+	in := referral.JoinInput{AcceptTerms: req.AcceptTerms}
+	if strings.TrimSpace(req.VerificationToken) != "" {
+		if h.verifyPhone == nil {
+			return response.Error(c, fiber.StatusServiceUnavailable, "Phone verification is not available", nil)
+		}
+		tokenPhone, err := h.verifyPhone(req.VerificationToken, "phone_verify")
+		if err != nil {
+			return validate.FailVerificationToken(c)
+		}
+		normalized, _ := services.NormalizePhone(req.Phone)
+		if err := validate.FailPhoneVerifyToken(c, tokenPhone, normalized, req.Phone); err != nil {
+			return err
+		}
+		in.VerifiedPhone = tokenPhone
+	}
+	_, ac := staffActor(c)
+	d, err := h.svc.JoinAsAgent(c.Context(), userID, ac, in)
+	if err != nil {
+		return referralError(c, err)
+	}
+	return response.Success(c, fiber.StatusCreated, "You are now an agent", d)
+}
+
+func (h *ReferralHandler) SetMyPayoutAccount(c fiber.Ctx) error {
+	userID, ok := currentUser(c)
+	if !ok {
+		return nil
+	}
+	codeID, ok := optionalCodeID(c)
+	if !ok {
+		return nil
+	}
+	var in domain.ReferralPayoutAccount
+	if err := validate.BindAndValidate(c, &in); err != nil {
+		return err
+	}
+	_, ac := staffActor(c)
+	p, err := h.svc.SetMyPayoutAccount(c.Context(), userID, codeID, ac, in)
+	if err != nil {
+		return referralError(c, err)
+	}
+	return response.Success(c, fiber.StatusOK, "Payout account saved", p)
+}
+
 // ---- Staff ----
+
+func (h *ReferralHandler) GetSettings(c fiber.Ctx) error {
+	if !requireStaffReader(c) {
+		return nil
+	}
+	st, err := h.svc.Settings(c.Context())
+	if err != nil {
+		return referralError(c, err)
+	}
+	return response.Success(c, fiber.StatusOK, "Referral settings", st)
+}
+
+func (h *ReferralHandler) UpdateSettings(c fiber.Ctx) error {
+	if !requireAdminRole(c) {
+		return nil
+	}
+	var in referral.SettingsInput
+	if err := validate.BindAndValidate(c, &in); err != nil {
+		return err
+	}
+	actor, ac := staffActor(c)
+	st, err := h.svc.UpdateSettings(c.Context(), actor, ac, in)
+	if err != nil {
+		return referralError(c, err)
+	}
+	return response.Success(c, fiber.StatusOK, "Referral settings saved", st)
+}
 
 func staffActor(c fiber.Ctx) (uuid.UUID, *domain.AuditContext) {
 	id, _ := uuid.Parse(GetUserID(c))

@@ -299,11 +299,22 @@ type ReferralCode struct {
 	ProgramID   *uuid.UUID `gorm:"type:uuid" json:"programId,omitempty"`
 	Status      string     `gorm:"type:varchar(20);not null;default:'active'" json:"status"`
 	CreatedBy   *uuid.UUID `gorm:"type:uuid" json:"createdBy,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
+	// Where the owner wants to be paid (see ReferralPayoutAccount). Empty until they add it.
+	PayoutMethod  string    `gorm:"type:varchar(20);not null;default:''" json:"payoutMethod"`
+	PayoutBank    string    `gorm:"type:varchar(60);not null;default:''" json:"payoutBank"`
+	PayoutAccount string    `gorm:"type:varchar(40);not null;default:''" json:"payoutAccount"`
+	PayoutName    string    `gorm:"type:varchar(120);not null;default:''" json:"payoutName"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 func (ReferralCode) TableName() string { return "referral_codes" }
+
+// SelfSignup reports whether the owner created the code themselves ("Become an agent") rather
+// than staff creating it for them.
+func (c *ReferralCode) SelfSignup() bool {
+	return c.CreatedBy != nil && c.OwnerUserID != nil && *c.CreatedBy == *c.OwnerUserID
+}
 
 // ReferralClick is one visitor's visits through a code's link (one row per code and visitor).
 type ReferralClick struct {

@@ -87,8 +87,47 @@ All of these endpoints are signed in and return the usual `{ success, message, d
 - **`GET /api/referrals/me/activity?days=30&codeId`** returns daily `{ day, visitors, signups, qualified }`. Days are in Africa/Addis_Ababa time and missing days are zero-filled. The maximum is 90 days.
 - **`GET /api/referrals/me/payouts`** returns the payouts staff recorded: `{ amount, method, reference, note, paidAt }`.
 
+## Self-serve agents
+
+Any customer can become an agent from the app. There is no staff step: they accept the agent rules and get their code, link and dashboard straight away. New codes go on the default agent program.
+
+Rules for agents themselves, on top of the referral rules above:
+
+- An account has at most one agent code. Joining again returns the existing code.
+- Only active participant accounts can join. Staff accounts can't.
+- The account must have a phone number, and no other agent may use it (compared in international form, so `0911…` and `+251911…` match). An account without a phone (Telegram or Google sign-in) verifies one with the usual signup SMS code while joining. That code can only go to a number no other account uses.
+- Each payout account (method, bank and number) belongs to one agent. Mobile money numbers are compared in international form.
+- Staff can close self-serve signup from the Referrals tab. Existing agents keep working while it is closed.
+- Staff disable an agent by pausing their code. The agent still sees their dashboard, with a note that the account is paused, and the link stops working.
+
+Staff can still create codes by hand, for example for influencers. A staff-created agent code for someone who is already an agent is refused.
+
+### `GET /api/referrals/agent`
+
+```jsonc
+{
+  "open": true,          // staff switch
+  "isAgent": false,
+  "canJoin": true,
+  "reason": "",          // signup_closed | not_participant | account_inactive | needs_phone | phone_taken | agent_paused
+  "hasPhone": true,
+  "phone": "+251 ••• ••• •44",
+  "fullName": "Abebe Kebede",
+  "program": { … }       // the default agent program, same shape as in /referrals/me
+}
+```
+
+### `POST /api/referrals/agent`
+
+Takes `{ acceptTerms: true, phone?, verificationToken? }`. The phone and token come from `POST /api/auth/send-otp` and `POST /api/auth/verify-otp`, and only matter when the account has no phone yet. Returns the same body as `GET /api/referrals/me`. A blocked join returns 400 (or 403 when signup is closed or the account can't join) with a plain message.
+
+### `PUT /api/referrals/me/payout-account?codeId`
+
+Takes `{ method, bank?, account, name }`. The method is one of `telebirr`, `cbe_birr`, `mpesa` or `bank`, and `bank` needs the bank's name. Returns the saved account, normalized. 409 when another agent uses the account. Each code in `/referrals/me` has `code.selfSignup` and `code.payout` (null until set).
+
 ## Public endpoints
 
+- `GET /api/public/agent-program` returns `{ open, program }`: whether self-serve agent signup is open and the default agent program. The app shows it to visitors who aren't signed in.
 - `GET /api/public/referrals/:code` returns `{ code, kind, invitedBy }`. The frontend uses it for the "Invited by Abebe K." banner on signup.
 - `POST /api/public/referrals/:code/click` takes `{ visitorId, landingPath? }`. It is rate-limited to 300 per minute per IP and code.
 - `POST /api/referrals/claim` (signed in) takes `{ code, visitorId? }` and returns `{ attributed, code, reason? }`. The reason is one of `already_referred`, `existing_account`, `existing_customer` or `not_participant`.
@@ -110,6 +149,8 @@ Admin, super_admin and compliance can read. Only admin and super_admin can write
 - `POST /api/referral-attributions/:id/reject` takes `{ note? }`.
 - `POST /api/referral-attributions/:id/restore`
 - `POST /api/referrals/sweep`: runs the qualification check now.
+- `GET /api/referral-settings` and `PUT /api/referral-settings` take `{ agentSignupOpen }`. This switches self-serve agent signup on or off.
+- Code rows and details also include `selfSignup` and the payout account (`payoutMethod`, `payoutBank`, `payoutAccount` and `payoutName` on list rows, and `code.payout` on details).
 
 ## Influencer codes (Phase 2)
 
@@ -117,4 +158,4 @@ Influencer codes are the same codes with `kind: "influencer"` and their own defa
 
 ## Schema
 
-The tables are `referral_programs`, `referral_codes`, `referral_clicks`, `referral_attributions` and `referral_payouts`. They are created idempotently by `database.EnsureSafeSchema` (`platform/database/referrals.go`) and mirrored in `migrations/00018_referrals.sql`. A default program for each kind is seeded on first start.
+The tables are `referral_programs`, `referral_codes`, `referral_clicks`, `referral_attributions`, `referral_payouts` and `referral_settings`. They are created idempotently by `database.EnsureSafeSchema` (`platform/database/referrals.go`) and mirrored in `migrations/00018_referrals.sql` and `migrations/00020_self_serve_agents.sql`. A default program for each kind is seeded on first start.

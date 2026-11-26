@@ -139,6 +139,7 @@ func RegisterRoutes(app *fiber.App, db *gorm.DB, redisClient *goredis.Client, cf
 	optionalAuth := OptionalAuthMiddleware(authService, cfg.JWTAccessSecret, cacheRepo)
 	registerPublicAuctionRoutes(api, optionalAuth, auctionHandler)
 	referralHandler := NewReferralHandler(NewReferralService(db, userRepo, auditService, cfg))
+	referralHandler.SetPhoneVerifier(authService.VerifyPhoneToken)
 	registerPublicReferralRoutes(api, referralHandler, limiterStorage)
 
 	protected := api.Group("/", AuthMiddlewareWithCache(authService, cfg.JWTAccessSecret, cacheRepo))
