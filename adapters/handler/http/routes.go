@@ -12,11 +12,13 @@ import (
 	"github.com/bid-hub/admin-backend/adapters/service"
 	r2storage "github.com/bid-hub/admin-backend/adapters/storage/r2"
 	telegramadapter "github.com/bid-hub/admin-backend/adapters/telegram"
+	"github.com/bid-hub/admin-backend/core/ports"
 	"github.com/bid-hub/admin-backend/core/services"
 	"github.com/bid-hub/admin-backend/core/services/chapapayment"
 	"github.com/bid-hub/admin-backend/core/services/lub"
 	"github.com/bid-hub/admin-backend/core/services/notifications"
 	"github.com/bid-hub/admin-backend/core/services/paymentledger"
+	"github.com/bid-hub/admin-backend/core/services/referral"
 	"github.com/bid-hub/admin-backend/platform/cache"
 	"github.com/bid-hub/admin-backend/platform/env"
 	"github.com/gofiber/fiber/v3"
@@ -135,6 +137,8 @@ func RegisterRoutes(app *fiber.App, db *gorm.DB, redisClient *goredis.Client, cf
 
 	optionalAuth := OptionalAuthMiddleware(authService, cfg.JWTAccessSecret, cacheRepo)
 	registerPublicAuctionRoutes(api, optionalAuth, auctionHandler)
+	referralHandler := NewReferralHandler(NewReferralService(db, userRepo, auditService, cfg))
+	registerPublicReferralRoutes(api, referralHandler, limiterStorage)
 
 	protected := api.Group("/", AuthMiddlewareWithCache(authService, cfg.JWTAccessSecret, cacheRepo))
 
@@ -143,6 +147,7 @@ func RegisterRoutes(app *fiber.App, db *gorm.DB, redisClient *goredis.Client, cf
 	registerAdminAuctionRoutes(protected, auctionAdminHandler)
 	registerMiscRoutes(protected, dashboardHandler, mediaPresignHandler, notificationHandler, legalDocHandler)
 	registerTelegramBroadcastRoutes(api, optionalAuth, protected, telegramBroadcastHandler)
+	registerReferralRoutes(protected, referralHandler)
 
 	return nil
 }
@@ -267,4 +272,24 @@ func registerAdminAuctionRoutes(protected fiber.Router, adminHandler *AuctionAdm
 	auctions.Get("/:id/participants", adminHandler.ListParticipants)
 	auctions.Get("/:id/bids", adminHandler.ListBids)
 	auctions.Get("/:id/winner-offers", adminHandler.ListWinnerOffers)
+}
+
+// NewReferralService wires the referral service. The one-referral-per-payment-account rule asks
+// Chapa who paid, so it is on only when Chapa keys are configured.
+func NewReferralService(db *gorm.DB, users ports.UserRepository, audit ports.AuditLogService, cfg *env.Config) *referral.Service {
+	svc := referral.NewService(postgres.NewReferralRepository(db), users, slog.Default())
+	if audit != nil {
+		svc.SetAuditLog(audit)
+	}
+	if cfg != nil {
+		svc.SetAppURL(cfg.ParticipantAppURL)
+		if strings.TrimSpace(cfg.ChapaSecretKey) != "" {
+			baseURL := cfg.ChapaBaseURL
+			if strings.TrimSpace(cfg.ChapaAPIURL) != "" {
+				baseURL = strings.TrimSpace(cfg.ChapaAPIURL)
+			}
+			svc.SetPayerAccountResolver(payment.NewChapaClient(cfg.ChapaSecretKey, baseURL))
+		}
+	}
+	return svc
 }

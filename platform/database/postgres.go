@@ -107,6 +107,7 @@ func EnsureSafeSchema(db *gorm.DB) {
 			slog.Error("database: safe schema patch failed", "error", err)
 		}
 	}
+	ensureReferralSchema(db)
 }
 
 func Migrate(db *gorm.DB) {
