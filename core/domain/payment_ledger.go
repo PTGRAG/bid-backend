@@ -25,6 +25,9 @@ type Payment struct {
 	// the bid amount(s) only. Set once at checkout from server-side eligibility (never from
 	// client or Chapa meta). While pending/success it is unique per user (partial index).
 	EntranceWaived  bool       `gorm:"not null;default:false"                                                                  json:"entranceWaived"`
+	// FreeBidsUsed is how many near-miss free bids this checkout spent (each waives one ticket's
+	// entrance fee). Held while pending/success; released when the payment fails or is refunded.
+	FreeBidsUsed    int        `gorm:"not null;default:0"                                                                      json:"freeBidsUsed"`
 	// Purpose is "entry" (ticket checkout, entrance fees only) or "winner" (the winner paying
 	// their bid amount after the draw). Set once at checkout; never changed afterwards.
 	Purpose         string     `gorm:"type:varchar(20);not null;default:'entry'"                                               json:"purpose"`

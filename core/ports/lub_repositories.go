@@ -1,6 +1,7 @@
 package ports
 
 import (
+	"context"
 	"time"
 
 	"github.com/bid-hub/admin-backend/core/domain"
@@ -86,4 +87,16 @@ type WinnerOfferRepository interface {
 	// AdvanceReminder moves reminders_sent from `from` to from+1 on an awaiting offer.
 	// ok=false means another worker already sent it (or the offer closed).
 	AdvanceReminder(id uuid.UUID, from int) (ok bool, err error)
+}
+
+// FreeBidRepository stores near-miss free bids and the staff-editable rules.
+type FreeBidRepository interface {
+	GetSettings(ctx context.Context) (domain.NearMissSettings, error)
+	SaveSettings(ctx context.Context, s domain.NearMissSettings) error
+	// CreateGrants inserts grants, skipping customers already credited for the same auction, and
+	// returns the ones actually created.
+	CreateGrants(ctx context.Context, grants []domain.FreeBidGrant) ([]domain.FreeBidGrant, error)
+	Balance(ctx context.Context, participantID string) (available, earned, used int, err error)
+	ListByParticipant(ctx context.Context, participantID string, limit int) ([]domain.FreeBidGrant, error)
+	ListByAuction(ctx context.Context, auctionID uuid.UUID) ([]domain.FreeBidGrant, error)
 }

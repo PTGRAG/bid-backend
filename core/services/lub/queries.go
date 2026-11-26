@@ -1,6 +1,9 @@
 package lub
 
 import (
+	"context"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/bid-hub/admin-backend/core/domain"
@@ -231,6 +234,9 @@ func (s *Service) ListAuctionBids(auctionID uuid.UUID, page, limit int) ([]domai
 	return bids, total, nil
 }
 
+// auditMaskedBidders is how many of the lowest unique bids show a masked bidder name.
+const auditMaskedBidders = 10
+
 func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, error) {
 	a, err := s.auctionRepo.GetByID(auctionID)
 	if err != nil {
@@ -252,9 +258,10 @@ func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, er
 	}
 
 	type valGroup struct {
-		bidValue domain.Money
-		count    int
-		isWinner bool
+		bidValue    domain.Money
+		count       int
+		isWinner    bool
+		participant string
 	}
 	var groups []valGroup
 	groupMap := make(map[string]int)
@@ -265,9 +272,10 @@ func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, er
 		if !exists {
 			groupMap[valStr] = len(groups)
 			groups = append(groups, valGroup{
-				bidValue: b.BidValue,
-				count:    1,
-				isWinner: b.IsWinner,
+				bidValue:    b.BidValue,
+				count:       1,
+				isWinner:    b.IsWinner,
+				participant: b.ParticipantID,
 			})
 		} else {
 			groups[idx].count++
@@ -277,8 +285,23 @@ func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, er
 		}
 	}
 
+	sort.Slice(groups, func(i, j int) bool { return groups[i].bidValue.LessThan(groups[j].bidValue) })
+
+	// Near-miss free bids given for this auction, by participant and bid value.
+	freeBid := map[string]bool{}
+	if s.freeBids != nil {
+		if grants, gErr := s.freeBids.ListByAuction(context.Background(), auctionID); gErr == nil {
+			for _, g := range grants {
+				if g.BidValue != nil {
+					freeBid[strings.ToLower(g.ParticipantID)+"|"+g.BidValue.String()] = true
+				}
+			}
+		}
+	}
+
 	uniqueCount := 0
 	duplicateCount := 0
+	masked := 0
 	entries := make([]domain.AuctionAuditEntry, len(groups))
 
 	for i, g := range groups {
@@ -298,10 +321,26 @@ func (s *Service) GetAuctionAudit(auctionID uuid.UUID) (*domain.AuctionAudit, er
 			IsUnique: isUnique,
 			IsWinner: isWinner,
 		}
+		if g.count == 1 {
+			entries[i].FreeBid = freeBid[strings.ToLower(g.participant)+"|"+g.bidValue.String()]
+			// Masked names for the lowest unique bids only (the winner's area), so the list
+			// stays checkable without exposing every customer.
+			if masked < auditMaskedBidders && s.contacts != nil {
+				name, _, _ := s.contacts.ParticipantContact(g.participant)
+				entries[i].Bidder = domain.MaskBidderName(name)
+				masked++
+			}
+		}
 	}
 
 	// The winner is named only once they have paid (pay only if you win).
 	s.EnrichWinnerPayment(a, "")
+	if a.WinnerPaymentStatus != domain.WinnerPaymentStatusPaid {
+		// Until the result is locked, show bid values only.
+		for i := range entries {
+			entries[i].Bidder = ""
+		}
+	}
 
 	audit := &domain.AuctionAudit{
 		AuctionID:           a.ID,

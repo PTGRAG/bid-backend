@@ -25,6 +25,30 @@ const waivedPerUserIndexSQL = `DO $$ BEGIN
 	END IF;
 END $$;`
 
+// freeBidGrantsTableSQL stores near-miss free bids (one row per free bid; see domain.FreeBidGrant).
+const freeBidGrantsTableSQL = `CREATE TABLE IF NOT EXISTS free_bid_grants (
+	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	participant_id UUID NOT NULL,
+	auction_id UUID REFERENCES auctions(id) ON DELETE SET NULL,
+	reason VARCHAR(30) NOT NULL CHECK (reason IN ('runner_up', 'duplicate_knockout', 'staff_grant')),
+	rank INTEGER NOT NULL DEFAULT 0,
+	bid_value DECIMAL(10,2),
+	note VARCHAR(255) NOT NULL DEFAULT '',
+	created_by UUID,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)`
+
+// nearMissSettingsTableSQL holds the one-row staff-editable near-miss rules.
+const nearMissSettingsTableSQL = `CREATE TABLE IF NOT EXISTS near_miss_settings (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	enabled BOOLEAN NOT NULL DEFAULT true,
+	runner_ups INTEGER NOT NULL DEFAULT 4 CHECK (runner_ups BETWEEN 0 AND 50),
+	include_duplicates BOOLEAN NOT NULL DEFAULT false,
+	max_duplicates INTEGER NOT NULL DEFAULT 10 CHECK (max_duplicates BETWEEN 0 AND 500),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_by UUID
+)`
+
 // winnerOffersTableSQL creates the pay-only-if-you-win offers table (one row per winner offered
 // the prize; see domain.WinnerOffer).
 const winnerOffersTableSQL = `CREATE TABLE IF NOT EXISTS auction_winner_offers (
@@ -96,6 +120,15 @@ func EnsureSafeSchema(db *gorm.DB) {
 		`CREATE UNIQUE INDEX IF NOT EXISTS ux_winner_offers_one_paid ON auction_winner_offers (auction_id) WHERE status = 'paid'`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS ux_winner_offers_participant ON auction_winner_offers (auction_id, participant_id)`,
 		feePaidAllowsZeroSQL,
+		// Near-miss free bids (see domain/free_bid.go).
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS free_bids_used INTEGER NOT NULL DEFAULT 0`,
+		`DO $$ BEGIN
+			ALTER TABLE payments ADD CONSTRAINT chk_payments_free_bids_used CHECK (free_bids_used >= 0);
+		EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+		freeBidGrantsTableSQL,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_free_bid_grants_auction ON free_bid_grants (participant_id, auction_id) WHERE auction_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_free_bid_grants_participant ON free_bid_grants (participant_id, created_at DESC)`,
+		nearMissSettingsTableSQL,
 		`UPDATE auctions
 		 SET image_urls = jsonb_build_array(image_url)
 		 WHERE (image_urls IS NULL OR image_urls = '[]'::jsonb)

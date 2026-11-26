@@ -28,6 +28,8 @@ type Stack struct {
 	Auctions ports.AuctionRepository
 	// WinnerOffers is the pay-only-if-you-win offers repository.
 	WinnerOffers ports.WinnerOfferRepository
+	// FreeBids is the near-miss free-bid repository.
+	FreeBids ports.FreeBidRepository
 	// Admin records staff alerts (Telegram admin chat in production).
 	Admin *AdminRecorder
 }
@@ -86,6 +88,8 @@ func NewStack(t testing.TB, pg *PG) *Stack {
 	lubSvc.SetAdminNotifier(admin)
 	lubSvc.SetWinnerPaymentChecker(chapaSvc)
 	lubSvc.SetContactLookup(notifSvc)
+	freeBids := postgres.NewFreeBidRepository(db)
+	lubSvc.SetFreeBids(freeBids)
 	chapaSvc.SetAdminNotifier(admin)
 
 	return &Stack{
@@ -98,6 +102,7 @@ func NewStack(t testing.TB, pg *PG) *Stack {
 		Ledger:       paymentLedgerRepo,
 		Auctions:     auctionRepo,
 		WinnerOffers: winnerOffers,
+		FreeBids:     freeBids,
 		Admin:        admin,
 	}
 }

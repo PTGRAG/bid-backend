@@ -21,11 +21,11 @@ func NewPaymentLedgerRepository(db *gorm.DB) *PaymentLedgerRepo {
 }
 
 const safePaymentSelect = `id, tx_ref, chapa_reference, user_id, auction_id, participation_id,
-	amount, bid_values, entrance_waived, purpose, winner_offer_id, status, processed, retry_disabled, last_error, created_at, updated_at`
+	amount, bid_values, entrance_waived, free_bids_used, purpose, winner_offer_id, status, processed, retry_disabled, last_error, created_at, updated_at`
 
 // Qualified for JOINs (participant_users / auctions also have id, status, created_at, …).
 const safePaymentSelectQualified = `payments.id, payments.tx_ref, payments.chapa_reference, payments.user_id, payments.auction_id, payments.participation_id,
-	payments.amount, payments.bid_values, payments.entrance_waived, payments.purpose, payments.winner_offer_id, payments.status, payments.processed, payments.retry_disabled, payments.last_error, payments.created_at, payments.updated_at`
+	payments.amount, payments.bid_values, payments.entrance_waived, payments.free_bids_used, payments.purpose, payments.winner_offer_id, payments.status, payments.processed, payments.retry_disabled, payments.last_error, payments.created_at, payments.updated_at`
 
 const paymentStaffEnrichSelect = safePaymentSelectQualified + `,
 	participant_users.full_name AS participant_name,

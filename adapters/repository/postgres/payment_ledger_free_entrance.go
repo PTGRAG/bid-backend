@@ -83,6 +83,10 @@ func (r *PaymentLedgerRepo) CreateWaivedPending(ctx context.Context, p *domain.P
 			return domain.ErrFreeEntranceUnavailable
 		}
 
+		if err := reserveFreeBids(tx, p.UserID.String(), p.FreeBidsUsed); err != nil {
+			return err
+		}
+
 		now := time.Now()
 		p.CreatedAt = now
 		p.UpdatedAt = now
@@ -210,4 +214,43 @@ func (r *PaymentLedgerRepo) ListPendingWaivedByUser(ctx context.Context, userID 
 		Order("created_at ASC").
 		Find(&rows).Error
 	return rows, err
+}
+
+// CreatePendingWithFreeBids records a pending (not waived) checkout that spends p.FreeBidsUsed
+// free bids. The balance check and the ledger row are written in one transaction under the
+// customer's lock; domain.ErrFreeBidsUnavailable means the free bids are gone.
+func (r *PaymentLedgerRepo) CreatePendingWithFreeBids(ctx context.Context, p *domain.Payment) error {
+	if p == nil || p.UserID == nil || p.AuctionID == nil || strings.TrimSpace(p.TxRef) == "" || p.FreeBidsUsed <= 0 {
+		return fmt.Errorf("free-bid payment needs tx_ref, user, auction and free bids: %w", domain.ErrInvalidInput)
+	}
+	if p.Amount.IsNegative() {
+		return fmt.Errorf("payment amount cannot be negative: %w", domain.ErrInvalidInput)
+	}
+	p.Status = domain.PaymentStatusPending
+	p.Processed = false
+	if p.ID == uuid.Nil {
+		p.ID = uuid.New()
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := reserveFreeBids(tx, p.UserID.String(), p.FreeBidsUsed); err != nil {
+			return err
+		}
+		now := time.Now()
+		p.CreatedAt = now
+		p.UpdatedAt = now
+		return tx.Create(p).Error
+	})
+}
+
+// FreeBidBalance returns a customer's available free bids (never negative).
+func (r *PaymentLedgerRepo) FreeBidBalance(ctx context.Context, userID uuid.UUID) (int, error) {
+	available, _, _, err := freeBidBalance(r.db.WithContext(ctx), userID.String())
+	return available, err
+}
+
+// FreeBidsOverspent reports whether a customer's checkouts hold more free bids than they earned
+// (a released checkout that was paid after all, once its free bids were spent elsewhere).
+func (r *PaymentLedgerRepo) FreeBidsOverspent(ctx context.Context, userID uuid.UUID) (bool, error) {
+	_, earned, used, err := freeBidBalance(r.db.WithContext(ctx), userID.String())
+	return used > earned, err
 }

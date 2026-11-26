@@ -41,6 +41,7 @@ const (
 	NotificationTypeWinnerPaymentReminder  = "winner_payment_reminder" // you won, deadline approaching
 	NotificationTypeWinnerPaymentExpired   = "winner_payment_expired"  // you won but did not pay in time
 	NotificationTypeWinnerPaid             = "winner_paid"             // your winning payment went through
+	NotificationTypeFreeBid                = "free_bid"                // you were close: one free bid credited
 	NotificationTypeAuctionActivated       = "auction_activated"
 	NotificationTypeAuctionClosed          = "auction_closed"
 	NotificationTypeAuctionPostponed       = "auction_postponed"

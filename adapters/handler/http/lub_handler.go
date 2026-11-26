@@ -55,6 +55,9 @@ type RecordParticipationRequest struct {
 	// ExpectEntranceFree is true when the UI quoted the customer a waived entrance fee. If the
 	// server can no longer honour it, checkout fails with 409 instead of charging more.
 	ExpectEntranceFree bool `json:"expectEntranceFree"`
+	// ExpectFreeBids is how many near-miss free bids the UI applied to the quote. If the server
+	// can apply fewer, checkout fails with 409 instead of charging more.
+	ExpectFreeBids int `json:"expectFreeBids"`
 }
 
 const maxBidPackSize = 10
@@ -296,30 +299,43 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 		return mapLUBError(c, domain.ErrFreeEntranceUnavailable)
 	}
 
+	// Near-miss free bids: each waives one more ticket's entrance fee, after the free entrance.
+	freeBids := 0
+	if !a.EntranceFee.IsZero() {
+		balance, bErr := h.chapaPaymentSvc.FreeBidBalance(c.Context(), userUUID)
+		if bErr != nil {
+			return response.Error(c, fiber.StatusInternalServerError, "Failed to load free bids", bErr)
+		}
+		freeBids = domain.FreeBidsApplicable(balance, len(bidPack), waive)
+	}
+	if req.ExpectFreeBids > freeBids {
+		return mapLUBError(c, domain.ErrFreeBidsUnavailable)
+	}
+
 	txRef := "R-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:20]
 
-	// Free entrance waives the entrance fee of the FIRST bid only (index 0); every other bid in
-	// the pack still pays fee + bid. Always computed here, never taken from the client.
-	chargeAmount := domain.CheckoutCharge(bidPack, a.EntranceFee, waive)
+	// Free entrance waives the entrance fee of the FIRST ticket only (index 0) and each free bid
+	// waives one more. Always computed here, never taken from the client.
+	chargeAmount := domain.CheckoutChargeWithFreeBids(bidPack, a.EntranceFee, waive, freeBids)
+	freeCheckout := waive || freeBids > 0
 
-	if waive {
-		// Atomically reserves the free slot and records the pending checkout.
-		if err := h.chapaPaymentSvc.CreateWaivedPendingPayment(c.Context(), txRef, userUUID, auctionID, chargeAmount, bidPack...); err != nil {
-			if errors.Is(err, domain.ErrFreeEntranceUnavailable) {
-				// Lost the slot to a concurrent joiner: never silently charge the full fee.
-				return mapLUBError(c, err)
-			}
-			return response.Error(c, fiber.StatusInternalServerError, "Failed to create pending payment", err)
+	// Reserves the free slot and free bids atomically with the pending ledger row.
+	if err := h.chapaPaymentSvc.CreateCheckoutPayment(c.Context(), chapapayment.CheckoutRequest{
+		TxRef: txRef, UserID: userUUID, AuctionID: auctionID, Amount: chargeAmount,
+		Waived: waive, FreeBids: freeBids, BidValues: bidPack,
+	}); err != nil {
+		if errors.Is(err, domain.ErrFreeEntranceUnavailable) || errors.Is(err, domain.ErrFreeBidsUnavailable) {
+			// Lost the slot or free bids to a concurrent checkout: never silently charge more.
+			return mapLUBError(c, err)
 		}
-	} else if err := h.chapaPaymentSvc.CreatePendingPayment(c.Context(), txRef, userUUID, auctionID, chargeAmount, bidPack...); err != nil {
 		return response.Error(c, fiber.StatusInternalServerError, "Failed to create pending payment", err)
 	}
 
-	if waive && chargeAmount.IsZero() {
-		// One free ticket: nothing to charge, so the ticket is issued without Chapa.
+	if freeCheckout && chargeAmount.IsZero() {
+		// Every ticket is free: nothing to charge, so the tickets are issued without Chapa.
 		if err := h.chapaPaymentSvc.FulfillFreeCheckout(c.Context(), txRef); err != nil {
 			if !errors.Is(err, chapapayment.ErrFulfillmentDeferred) {
-				h.chapaPaymentSvc.AbortWaivedCheckout(c.Context(), txRef, "free ticket fulfillment failed")
+				h.chapaPaymentSvc.AbortCheckout(c.Context(), txRef, "free ticket fulfillment failed")
 				return mapLUBError(c, err)
 			}
 		}
@@ -409,10 +425,17 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 		// Informational only; the waiver is read from the ledger row, never from this meta.
 		meta["entrance_waived"] = "true"
 	}
+	if freeBids > 0 {
+		meta["free_bids"] = strconv.Itoa(freeBids)
+	}
+	free := freeBids
+	if waive {
+		free++
+	}
 	if len(bidPack) > 1 {
 		desc = fmt.Sprintf("Auction tickets x%d", len(bidPack))
-		if waive {
-			desc = fmt.Sprintf("Auction tickets x%d (first free)", len(bidPack))
+		if free > 0 {
+			desc = fmt.Sprintf("Auction tickets x%d (%d free)", len(bidPack), free)
 		}
 	}
 
@@ -431,9 +454,9 @@ func (h *AuctionHandler) RecordParticipation(c fiber.Ctx) error {
 		Meta:        meta,
 	})
 	if err != nil {
-		if waive {
-			// The checkout never reached Chapa: give the reserved free slot back right away.
-			h.chapaPaymentSvc.AbortWaivedCheckout(c.Context(), txRef, "chapa initialize failed")
+		if freeCheckout {
+			// The checkout never reached Chapa: give the free slot and free bids back right away.
+			h.chapaPaymentSvc.AbortCheckout(c.Context(), txRef, "chapa initialize failed")
 		}
 		return response.Error(c, fiber.StatusBadGateway, "Could not start the payment. Please try again.", err)
 	}
