@@ -52,6 +52,7 @@ func registerPublicReferralRoutes(api fiber.Router, h *ReferralHandler, limiterS
 		},
 		Storage: limiterStorage,
 	})
+	api.Get("/public/agent-program", h.AgentProgram)
 	api.Get("/public/referrals/:code", h.Lookup)
 	api.Post("/public/referrals/:code/click", clickLimit, h.Click)
 }
@@ -242,6 +243,14 @@ func (h *ReferralHandler) MyPayouts(c fiber.Ctx) error {
 		return referralError(c, err)
 	}
 	return response.Success(c, fiber.StatusOK, "Referral payouts", p)
+}
+
+func (h *ReferralHandler) AgentProgram(c fiber.Ctx) error {
+	info, err := h.svc.AgentProgram(c.Context())
+	if err != nil {
+		return referralError(c, err)
+	}
+	return response.Success(c, fiber.StatusOK, "Agent program", info)
 }
 
 func (h *ReferralHandler) AgentJoinInfo(c fiber.Ctx) error {

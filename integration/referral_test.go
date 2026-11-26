@@ -543,6 +543,9 @@ func TestReferral_SelfServeAgentRules(t *testing.T) {
 	if _, err := e.svc.UpdateSettings(ctx, e.admin.ID, nil, referral.SettingsInput{AgentSignupOpen: ptr(false)}); err != nil {
 		t.Fatal(err)
 	}
+	if pub, err := e.svc.AgentProgram(ctx); err != nil || pub.Open || pub.Program.Kind != domain.ReferralKindAgent {
+		t.Fatalf("public agent program while closed: %v %+v", err, pub)
+	}
 	late := e.user("Late Agent", "+251955500500", 24*time.Hour)
 	if info, _ := e.svc.AgentJoinInfo(ctx, late.ID); info.Open || info.Reason != referral.JoinBlockedClosed {
 		t.Fatalf("closed: %+v", info)

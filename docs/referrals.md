@@ -127,6 +127,7 @@ Takes `{ method, bank?, account, name }`. The method is one of `telebirr`, `cbe_
 
 ## Public endpoints
 
+- `GET /api/public/agent-program` returns `{ open, program }`: whether self-serve agent signup is open and the default agent program. The app shows it to visitors who aren't signed in.
 - `GET /api/public/referrals/:code` returns `{ code, kind, invitedBy }`. The frontend uses it for the "Invited by Abebe K." banner on signup.
 - `POST /api/public/referrals/:code/click` takes `{ visitorId, landingPath? }`. It is rate-limited to 300 per minute per IP and code.
 - `POST /api/referrals/claim` (signed in) takes `{ code, visitorId? }` and returns `{ attributed, code, reason? }`. The reason is one of `already_referred`, `existing_account`, `existing_customer` or `not_participant`.

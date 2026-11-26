@@ -82,6 +82,29 @@ func (s *Service) joinBlock(repo ports.ReferralRepository, u *domain.User, phone
 	return "", nil
 }
 
+// AgentProgramInfo is the public pitch for visitors who aren't signed in: whether agent signup
+// is open and the deal a new agent gets.
+type AgentProgramInfo struct {
+	Open    bool        `json:"open"`
+	Program ProgramView `json:"program"`
+}
+
+func (s *Service) AgentProgram(ctx context.Context) (*AgentProgramInfo, error) {
+	settings, err := s.repo.GetSettings()
+	if err != nil {
+		return nil, err
+	}
+	program, err := s.repo.GetDefaultProgram(domain.ReferralKindAgent)
+	if err != nil {
+		return nil, err
+	}
+	pv, err := s.programView(program)
+	if err != nil {
+		return nil, err
+	}
+	return &AgentProgramInfo{Open: settings.AgentSignupOpen, Program: pv}, nil
+}
+
 // AgentJoinInfo tells the app what to show on the "Become an agent" screen.
 func (s *Service) AgentJoinInfo(ctx context.Context, userID uuid.UUID) (*AgentJoinInfo, error) {
 	u, err := s.users.GetByID(userID)
