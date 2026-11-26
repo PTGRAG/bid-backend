@@ -38,6 +38,10 @@ type CodeView struct {
 	Status    string    `json:"status"`
 	Link      string    `json:"link"`
 	CreatedAt time.Time `json:"createdAt"`
+	// SelfSignup is true when the owner became an agent from the app (not created by staff).
+	SelfSignup bool `json:"selfSignup"`
+	// Payout is where the owner wants to be paid; nil until they add it.
+	Payout *domain.ReferralPayoutAccount `json:"payout"`
 }
 
 // Funnel is link click -> signup -> qualified bidder for one code (or a sum of codes).
@@ -152,7 +156,10 @@ func (s *Service) summarize(codes []domain.ReferralCode) ([]CodeSummary, Totals,
 			SignupToQualifiedRate: pct(n.Qualified, n.Signups),
 		}
 		out = append(out, CodeSummary{
-			Code:     CodeView{ID: c.ID, Code: c.Code, Kind: c.Kind, Label: c.Label, Status: c.Status, Link: s.link(c.Code), CreatedAt: c.CreatedAt},
+			Code: CodeView{
+				ID: c.ID, Code: c.Code, Kind: c.Kind, Label: c.Label, Status: c.Status, Link: s.link(c.Code),
+				CreatedAt: c.CreatedAt, SelfSignup: c.SelfSignup(), Payout: payoutOf(&c),
+			},
 			Program:  pv,
 			Funnel:   f,
 			Earnings: ev,
@@ -386,11 +393,12 @@ func (s *Service) CodePayouts(ctx context.Context, id uuid.UUID) ([]domain.Refer
 // CodeListItem is a row of the staff code list, with earnings.
 type CodeListItem struct {
 	ports.ReferralCodeRow
-	Link      string       `json:"link"`
-	Threshold int          `json:"threshold"`
-	Unlocked  bool         `json:"unlocked"`
-	Earned    domain.Money `json:"earned"`
-	Owed      domain.Money `json:"owed"`
+	Link       string       `json:"link"`
+	SelfSignup bool         `json:"selfSignup"`
+	Threshold  int          `json:"threshold"`
+	Unlocked   bool         `json:"unlocked"`
+	Earned     domain.Money `json:"earned"`
+	Owed       domain.Money `json:"owed"`
 }
 
 type CodeListPage struct {
@@ -422,7 +430,7 @@ func (s *Service) ListCodes(ctx context.Context, f ports.ReferralCodeFilter) (*C
 			owed = e.Earned.Sub(r.PaidOut)
 		}
 		page.Items = append(page.Items, CodeListItem{
-			ReferralCodeRow: r, Link: s.link(r.Code), Threshold: p.Threshold, Unlocked: e.Unlocked, Earned: e.Earned, Owed: owed,
+			ReferralCodeRow: r, Link: s.link(r.Code), SelfSignup: r.ReferralCode.SelfSignup(), Threshold: p.Threshold, Unlocked: e.Unlocked, Earned: e.Earned, Owed: owed,
 		})
 	}
 	return page, nil

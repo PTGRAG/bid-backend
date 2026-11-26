@@ -130,6 +130,19 @@ type ReferralRepository interface {
 	// Payouts
 	CreatePayout(p *domain.ReferralPayout) error
 	ListPayouts(codeIDs []uuid.UUID) ([]domain.ReferralPayout, error)
+
+	// Self-serve agents
+	GetSettings() (*domain.ReferralSettings, error)
+	UpdateSettings(s *domain.ReferralSettings) error
+	// WithAgentLock runs fn in a transaction that holds the agent signup lock, so two requests
+	// can't both pass the one-agent-per-phone and per-payout-account checks.
+	WithAgentLock(fn func(repo ReferralRepository) error) error
+	// AgentPhoneTaken reports whether an agent code other than exceptUser's belongs to an
+	// account with this phone (compared as PhoneDigits).
+	AgentPhoneTaken(phoneDigits string, exceptUser uuid.UUID) (bool, error)
+	// PayoutAccountTaken reports whether a code other than exceptCode is paid into this account.
+	PayoutAccountTaken(p domain.ReferralPayoutAccount, exceptCode uuid.UUID) (bool, error)
+	SetPayoutAccount(codeID uuid.UUID, p domain.ReferralPayoutAccount) error
 }
 
 // PayerAccountResolver returns a stable identifier for the account that paid a transaction
