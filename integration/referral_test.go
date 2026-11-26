@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -423,3 +424,162 @@ func TestReferral_EarningsAndPayouts(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// ---- Self-serve agents ----
+
+func (e *refEnv) join(u *domain.User, in referral.JoinInput) (*referral.AgentDashboard, error) {
+	e.t.Helper()
+	in.AcceptTerms = true
+	return e.svc.JoinAsAgent(context.Background(), u.ID, nil, in)
+}
+
+func appStatus(err error) int {
+	var ae *domain.AppError
+	if errors.As(err, &ae) {
+		return ae.Code
+	}
+	return 0
+}
+
+func TestReferral_SelfServeAgentJoin(t *testing.T) {
+	e := newRefEnv(t)
+	ctx := context.Background()
+	u := e.user("Selam Tesfaye", "+251922200200", 24*time.Hour*90)
+
+	info, err := e.svc.AgentJoinInfo(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Open || !info.CanJoin || info.IsAgent || !info.HasPhone || info.Program.Threshold != domain.DefaultReferralThreshold {
+		t.Fatalf("unexpected join info %+v", info)
+	}
+
+	if _, err := e.svc.JoinAsAgent(ctx, u.ID, nil, referral.JoinInput{}); appStatus(err) != 400 {
+		t.Fatalf("join without accepting the rules: want 400, got %v", err)
+	}
+	d, err := e.join(u, referral.JoinInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.IsReferrer || len(d.Codes) != 1 || !d.Codes[0].Code.SelfSignup || d.Codes[0].Code.Payout != nil {
+		t.Fatalf("unexpected dashboard after join %+v", d)
+	}
+	code := d.Codes[0].Code.Code
+
+	// Joining again returns the same code.
+	d2, err := e.join(u, referral.JoinInput{})
+	if err != nil || len(d2.Codes) != 1 || d2.Codes[0].Code.Code != code {
+		t.Fatalf("second join: %v %+v", err, d2)
+	}
+	if info, _ := e.svc.AgentJoinInfo(ctx, u.ID); !info.IsAgent || info.CanJoin {
+		t.Fatalf("agent join info %+v", info)
+	}
+
+	// The code works like a staff-made one: a new signup is attributed to it.
+	friend := e.user("Friend", "+251922200201", time.Hour)
+	if r := e.claim(friend, code); !r.Attributed {
+		t.Fatalf("claim on self-serve code: %+v", r)
+	}
+
+	// Staff can't make a second agent code for the same person.
+	if _, err := e.svc.CreateCode(ctx, e.admin.ID, nil, referral.CodeInput{Kind: domain.ReferralKindAgent, OwnerPhone: u.Phone}); appStatus(err) != 409 {
+		t.Fatalf("staff duplicate agent code: want 409, got %v", err)
+	}
+
+	// Staff pause the agent: the app says so, and the code stops taking signups.
+	if _, err := e.svc.UpdateCode(ctx, e.admin.ID, nil, d.Codes[0].Code.ID, referral.CodeInput{Status: ptr(domain.ReferralCodePaused)}); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := e.svc.AgentJoinInfo(ctx, u.ID); info.Reason != referral.JoinBlockedPaused {
+		t.Fatalf("paused agent reason = %q", info.Reason)
+	}
+	if _, err := e.svc.LookupCode(ctx, code); err == nil {
+		t.Fatal("paused code should not resolve")
+	}
+}
+
+func TestReferral_SelfServeAgentRules(t *testing.T) {
+	e := newRefEnv(t)
+	ctx := context.Background()
+
+	// One agent per phone, whatever format the number was saved in.
+	a := e.user("Agent A", "+251933300300", 24*time.Hour*90)
+	if _, err := e.join(a, referral.JoinInput{}); err != nil {
+		t.Fatal(err)
+	}
+	dup := e.user("Agent A again", "0933300300", 24*time.Hour*90)
+	if info, _ := e.svc.AgentJoinInfo(ctx, dup.ID); info.CanJoin || info.Reason != referral.JoinBlockedPhoneTaken {
+		t.Fatalf("same phone: %+v", info)
+	}
+	if _, err := e.join(dup, referral.JoinInput{}); appStatus(err) != 400 {
+		t.Fatalf("same phone join: want 400, got %v", err)
+	}
+
+	// Staff accounts can't become agents.
+	if info, _ := e.svc.AgentJoinInfo(ctx, e.admin.ID); info.Reason != referral.JoinBlockedNotAllowed {
+		t.Fatalf("staff join reason = %q", info.Reason)
+	}
+
+	// No phone (a Telegram sign-in): blocked until a verified phone comes with the request.
+	tg := e.user("Telegram User", "", 24*time.Hour)
+	if info, _ := e.svc.AgentJoinInfo(ctx, tg.ID); info.Reason != referral.JoinBlockedNeedsPhone || info.HasPhone {
+		t.Fatalf("no phone: %+v", info)
+	}
+	if _, err := e.join(tg, referral.JoinInput{}); appStatus(err) != 400 {
+		t.Fatalf("join without phone: want 400, got %v", err)
+	}
+	if _, err := e.join(tg, referral.JoinInput{VerifiedPhone: a.Phone}); appStatus(err) != 409 {
+		t.Fatalf("verified phone of another account: want 409, got %v", err)
+	}
+	if _, err := e.join(tg, referral.JoinInput{VerifiedPhone: "+251944400400"}); err != nil {
+		t.Fatal(err)
+	}
+	var saved domain.User
+	if err := e.s.PG.DB.First(&saved, "id = ?", tg.ID).Error; err != nil || saved.Phone != "+251944400400" {
+		t.Fatalf("verified phone not saved: %v %q", err, saved.Phone)
+	}
+
+	// Staff close self-serve signup: new agents are turned away, existing agents keep working.
+	if _, err := e.svc.UpdateSettings(ctx, e.admin.ID, nil, referral.SettingsInput{AgentSignupOpen: ptr(false)}); err != nil {
+		t.Fatal(err)
+	}
+	late := e.user("Late Agent", "+251955500500", 24*time.Hour)
+	if info, _ := e.svc.AgentJoinInfo(ctx, late.ID); info.Open || info.Reason != referral.JoinBlockedClosed {
+		t.Fatalf("closed: %+v", info)
+	}
+	if _, err := e.join(late, referral.JoinInput{}); appStatus(err) != 403 {
+		t.Fatalf("closed join: want 403, got %v", err)
+	}
+	if d, err := e.join(a, referral.JoinInput{}); err != nil || !d.IsReferrer {
+		t.Fatalf("existing agent while closed: %v", err)
+	}
+	if _, err := e.svc.UpdateSettings(ctx, e.admin.ID, nil, referral.SettingsInput{AgentSignupOpen: ptr(true)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One payout account per agent.
+	wallet := domain.ReferralPayoutAccount{Method: "telebirr", Account: "0966600600", Name: "Agent A"}
+	p, err := e.svc.SetMyPayoutAccount(ctx, a.ID, nil, nil, wallet)
+	if err != nil || p.Account != "251966600600" {
+		t.Fatalf("set payout: %v %+v", err, p)
+	}
+	if _, err := e.svc.SetMyPayoutAccount(ctx, tg.ID, nil, nil, domain.ReferralPayoutAccount{Method: "telebirr", Account: "+251 966 600 600", Name: "Someone"}); appStatus(err) != 409 {
+		t.Fatalf("shared wallet: want 409, got %v", err)
+	}
+	// The same number as a bank account is a different account.
+	if _, err := e.svc.SetMyPayoutAccount(ctx, tg.ID, nil, nil, domain.ReferralPayoutAccount{Method: "bank", Bank: "Awash Bank", Account: "251966600600", Name: "Telegram User"}); err != nil {
+		t.Fatal(err)
+	}
+	// Saving your own account again is fine, and the dashboard shows it.
+	if _, err := e.svc.SetMyPayoutAccount(ctx, a.ID, nil, nil, wallet); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.dash(a).Code.Payout; got == nil || got.Method != "telebirr" || got.Account != "251966600600" {
+		t.Fatalf("dashboard payout %+v", got)
+	}
+	if _, err := e.svc.SetMyPayoutAccount(ctx, late.ID, nil, nil, wallet); appStatus(err) != 404 {
+		t.Fatalf("non-agent payout: want 404, got %v", err)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
